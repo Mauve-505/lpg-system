@@ -1,0 +1,23 @@
+# Local secrets and configuration
+api/config.php
+api/logs/
+database/backups/
+.env
+.env.*
+!.env.example
+
+# Frontend build output (the built files are deployed at the site root)
+node_modules/
+frontend/node_modules/
+frontend/dist/
+*.local
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Legacy Node runtime (kept for reference only)
+legacy/node-backend/node_modules/
+legacy/node-backend/.env

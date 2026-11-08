@@ -1,0 +1,44 @@
+# ============================================================================
+#  Site root: serve the built React app and protect server-side folders.
+#  Requires Apache mod_rewrite (enabled by default in XAMPP).
+# ============================================================================
+
+Options -Indexes
+DirectoryIndex index.html
+
+<IfModule mod_headers.c>
+  Header always set X-Content-Type-Options "nosniff"
+  Header always set X-Frame-Options "DENY"
+  Header always set Referrer-Policy "strict-origin-when-cross-origin"
+  Header always set Permissions-Policy "geolocation=(), microphone=(), camera=()"
+  Header always set Cross-Origin-Resource-Policy "same-origin"
+  Header always set Content-Security-Policy "default-src 'self'; base-uri 'self'; object-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; form-action 'self'"
+</IfModule>
+
+<IfModule mod_rewrite.c>
+  RewriteEngine On
+
+  # API is handled by api/.htaccess.
+  RewriteRule ^api/ - [L]
+
+  # Never expose source, database dumps, backups or tests.
+  RewriteRule ^(database|legacy|tests|docs)(/|$) - [F,L]
+
+  # Real files and directories (the built assets, images, robots.txt) win.
+  RewriteCond %{REQUEST_FILENAME} -f [OR]
+  RewriteCond %{REQUEST_FILENAME} -d
+  RewriteRule ^ - [L]
+
+  # Everything else is a client-side route.
+  RewriteRule ^ index.html [L]
+</IfModule>
+
+<FilesMatch "\.(sql|log|md|env|ini|bak|dump)$">
+  <IfModule mod_authz_core.c>
+    Require all denied
+  </IfModule>
+  <IfModule !mod_authz_core.c>
+    Order allow,deny
+    Deny from all
+  </IfModule>
+</FilesMatch>
