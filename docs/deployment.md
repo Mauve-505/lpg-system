@@ -305,7 +305,8 @@ Run these against the real HTTPS host:
 6. Create a staff account in each branch and log in.
 7. Place a cash order and a GCash order with a reference; confirm the GCash
    order cannot be approved until verified, then verify it as branch staff,
-   approve, deliver and check stock and reports.
+   approve, deliver and check stock and reports. The customer view must show
+   the delivered cash order as `paid` and the GCash order as `verified`.
 8. Record cash and GCash direct sales, resubmit a rejected reference, and void
    a sale.
 9. Create, approve, ship and receive a transfer.

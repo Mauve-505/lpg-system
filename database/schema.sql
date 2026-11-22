@@ -328,7 +328,7 @@ CREATE TABLE IF NOT EXISTS orders (
   customer_id INT NOT NULL,
   payment_method ENUM('cash','gcash','maya') NOT NULL DEFAULT 'cash',
   payment_reference VARCHAR(80) NULL,
-  payment_status ENUM('unpaid','pending_verification','verified','rejected') NOT NULL DEFAULT 'unpaid',
+  payment_status ENUM('unpaid','pending_verification','verified','rejected','paid') NOT NULL DEFAULT 'unpaid',
   payment_verified_by INT NULL,
   payment_verified_at DATETIME NULL,
   idempotency_key VARCHAR(80) NULL UNIQUE,
@@ -501,6 +501,7 @@ INSERT IGNORE INTO schema_migrations (version) VALUES ('005_prepaid_payments');
 INSERT IGNORE INTO schema_migrations (version) VALUES ('006_operational_hardening');
 INSERT IGNORE INTO schema_migrations (version) VALUES ('007_hygiene');
 INSERT IGNORE INTO schema_migrations (version) VALUES ('008_transfer_receiving');
+INSERT IGNORE INTO schema_migrations (version) VALUES ('009_cod_paid_on_delivery');
 
 -- One lock row per branch+size so SELECT ... FOR UPDATE always finds a row.
 INSERT IGNORE INTO stock_locks (branch_id, size_id)

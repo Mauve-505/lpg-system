@@ -36,7 +36,7 @@ Phase 1; `resolved` means a decision was made and implemented.
 | 18 | Prices | Per-branch override with global fallback | Confirm who may change prices, how often, and whether changes need approval. Currently owner-only. |
 | 19 | Credit limit | **removed** (Phase 1) | No credit, limits or per-branch totals remain. `customers.credit_limit` is gone; no decision needed. |
 | 20 | Credit terms / open balances | **removed** (Phase 1) | No due dates, statements, collections or open balances. Migration 005 refuses to run until legacy non-void credit balances are settled. |
-| 21 | Payment methods and verification | **resolved** (Phase 1): only `cash` (cash on delivery), `gcash`, `maya`; GCash/Maya require a 4–80 character reference and staff verification before approval/delivery. No payment gateway is integrated. | Confirm who is allowed to verify (staff, owner, or both), the final reference-number format, and who keeps branch GCash/Maya account details current — see items 70–72. |
+| 21 | Payment methods and verification | **resolved** (Phase 1, clarified Phase 4): only `cash` (cash on delivery), `gcash`, `maya`; COD starts `unpaid` and becomes `paid` when delivery is recorded. GCash/Maya require a 4–80 character reference and staff verification before approval/delivery. No payment gateway is integrated. | Confirm who is allowed to verify (staff, owner, or both), the final reference-number format, and who keeps branch GCash/Maya account details current — see items 70–72. |
 | 22 | Delivery fees | No delivery-fee field | Decide free vs charged delivery, and how a fee would be represented. |
 | 23 | Time slots | Free-text slot per order | Define standard slots per branch and whether they are enforced. |
 | 24 | Cutoff time | Optional per-branch same-day cutoff | Set real cutoff times and the customer-facing wording. |
@@ -124,10 +124,10 @@ reversed:
 - Prepaid only: cash (cash on delivery), GCash and Maya. Credit, balances,
   credit limits, the record-payment flow and the unpaid report were removed in
   Phase 1. The legacy payments table is read-only history.
-- GCash/Maya require a customer-submitted reference and staff verification
-  before an order can be approved or delivered. Duplicate references are
-  rejected across both orders and sales; a rejected reference can be resubmitted
-  on the pending order.
+- COD is recorded as `paid` when the rider marks the order delivered; GCash/Maya
+  require a customer-submitted reference and staff verification before an order
+  can be approved or delivered. Duplicate references are rejected across both
+  orders and sales; a rejected reference can be resubmitted on the pending order.
 - Prices, cylinder deposits and delivery fees are computed server-only from
   branch/size data; they are never accepted as authoritative client input.
 - Sessions are file-based, strict, re-checked against the DB on every request.

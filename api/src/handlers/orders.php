@@ -403,10 +403,23 @@ function api_order_deliver(array $params): void
             movement((int) $o['branch_id'], $date, $sid, 'sale', $saleId, -$qty, $back, $qty - $back, (int) $u['id'], 'Order ' . ($o['order_no'] ?? $orderId));
         }
 
+        // Cash is collected at the doorstep, so delivery settles the payment.
+        // GCash/Maya stay verified by the earlier staff verification step.
+        $deliveredAt = now_iso();
+        $cashSettled = ($o['payment_method'] ?? 'cash') === 'cash';
+        $paymentSql = $cashSettled
+            ? ", payment_status='paid', payment_verified_by=?, payment_verified_at=?"
+            : '';
+        $params = [$saleId, $deliveredAt, $riderId, $proof === '' ? null : $proof];
+        if ($cashSettled) {
+            $params[] = (int) $u['id'];
+            $params[] = $deliveredAt;
+        }
+        $params[] = $orderId;
         q(
             "UPDATE orders SET status='delivered', sale_id=?, delivered_at=?, rider_id=COALESCE(?,rider_id),
-                proof_of_delivery=COALESCE(?,proof_of_delivery) WHERE id=?",
-            [$saleId, now_iso(), $riderId, $proof === '' ? null : $proof, $orderId]
+                proof_of_delivery=COALESCE(?,proof_of_delivery)" . $paymentSql . " WHERE id=?",
+            $params
         );
         return ['sale_id' => $saleId, 'branch_id' => (int) $o['branch_id'], 'total' => $total, 'sale_no' => doc_no('SALE', $date, $saleId)];
     });

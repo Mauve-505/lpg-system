@@ -44,8 +44,9 @@ No Node.js is required at runtime. Node is only needed to build the frontend.
 - Signup and login; forced password change for owner-created accounts.
 - Multi-item orders with branch, cylinder size, quantity, date, time slot,
   delivery address, valve type, notes and deposit.
-- Prepaid payment choice: cash on delivery (no reference needed) or GCash/Maya
-  with a 4–80 character reference number that staff must verify.
+- Prepaid payment choice: cash on delivery (no reference needed; marked paid
+  when the rider delivers) or GCash/Maya with a 4–80 character reference number
+  that staff must verify.
 - Pending-order editing (including resubmitting a rejected reference) and
   cancellation; per-branch quantity limits and cutoff.
 - Locked order prices: later branch price changes do not rewrite past orders.

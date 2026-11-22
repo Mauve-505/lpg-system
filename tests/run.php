@@ -1812,6 +1812,10 @@ try {
 
     $r = $owner->request('POST', '/api/orders/' . $codOrderId . '/deliver', [], ['X-Branch-Id: ' . $southId]);
     expect($r, 200, 'owner delivers the COD order');
+    $r = $newCustomer->request('GET', '/api/my/orders/' . $codOrderId);
+    expect($r, 200, 'customer reloads the delivered COD order');
+    check(($r['json']['payment_status'] ?? '') === 'paid', 'delivered COD order shows payment_status paid');
+    check((int) ($r['json']['payment_verified_by'] ?? 0) > 0, 'delivered COD order records who collected the cash');
     $r = $newCustomer->request('GET', '/api/my/account');
     expect($r, 200, 'customer account loads after fee-aware COD delivery');
     check(!array_key_exists('balance', is_array($r['json']) ? $r['json'] : []), 'customer account has no balance field');
@@ -1932,6 +1936,9 @@ try {
     $r = $owner->request('POST', '/api/orders/' . $codOnlyId . '/deliver', [], $northHeader);
     expect($r, 200, 'COD order delivers without verification');
     $codOnlySaleId = (int) ($r['json']['sale_id'] ?? 0);
+    $r = $customer->request('GET', '/api/my/orders/' . $codOnlyId);
+    expect($r, 200, 'customer reloads the settled COD order');
+    check(($r['json']['payment_status'] ?? '') === 'paid', 'customer sees COD order as paid after delivery');
     $r = $owner->request('GET', '/api/sales/' . $codOnlySaleId, null, $northHeader);
     expect($r, 200, 'COD delivered sale reloads');
     check(($r['json']['payment_method'] ?? '') === 'cash' && has_null_field(is_array($r['json']) ? $r['json'] : [], 'payment_reference'), 'COD sale records cash with no reference');

@@ -174,8 +174,9 @@ certifications, prices, statistics or contact details in these variables.
 7. Create staff accounts assigned to their branch.
 8. Record opening stock with **Stock adjustments** for each branch and size.
 9. Create a test cash order and a test GCash order; verify the GCash reference
-   with a branch staff account, then approve and deliver both. Confirm stock
-   and report totals move correctly.
+   with a branch staff account, then approve and deliver both. The customer
+   order view should show the cash order as `paid` after delivery and the
+   GCash order as `verified`. Confirm stock and report totals move correctly.
 10. Delete or disable the demo data.
 
 The placeholder prices in `database/schema.sql` are inherited from the old

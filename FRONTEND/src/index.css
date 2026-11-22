@@ -68,7 +68,7 @@ td.acts{text-align:right}
 td.acts button+button{margin-left:6px}
 .empty{padding:36px 16px;text-align:center;color:var(--mut)}
 .badge{display:inline-block;padding:3px 10px;border-radius:99px;font-size:12px;font-weight:700}
-.b-cash,.b-staff,.b-delivered{background:var(--oks);color:var(--ok)}
+.b-cash,.b-staff,.b-delivered,.b-paid{background:var(--oks);color:var(--ok)}
 .b-unpaid,.b-pending,.b-pending_verification{background:var(--wns);color:var(--wn)}
 .b-owner,.b-customer,.b-approved,.b-verified,.b-gcash,.b-maya{background:var(--acs);color:var(--ac)}
 .b-rejected,.b-cancelled{background:var(--bads);color:var(--bad)}

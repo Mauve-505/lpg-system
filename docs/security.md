@@ -211,7 +211,8 @@ data isolation.
   the same key with the same details returns the original resource (HTTP 200);
   a conflicting re-use returns HTTP 409 `idempotency_conflict`.
 - Prepaid payment methods only: `cash` (cash on delivery), `gcash`, `maya`.
-  Cash needs no verification. A GCash/Maya order starts at
+  Cash needs no reference; the delivery transaction marks it `paid` and records
+  the collecting user. A GCash/Maya order starts at
   `payment_status: pending_verification` when the customer supplies a 4–80
   character `reference_no`, and cannot be approved or delivered until staff
   verification sets it to `verified` (`409 payment_not_verified` otherwise).

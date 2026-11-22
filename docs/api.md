@@ -226,9 +226,9 @@ Delivered orders keep the price locked at order creation.
 #### Payment verification workflow
 
 1. The customer submits an order with `pay: "cash"` (cash on delivery) or with
-   `pay: "gcash"` / `pay: "maya"` plus `reference_no`. Cash orders need no
-   verification; GCash/Maya orders start at
-   `payment_status: "pending_verification"`.
+   `pay: "gcash"` / `pay: "maya"` plus `reference_no`. Cash orders start
+   `unpaid`, need no reference and become `paid` when delivery is recorded;
+   GCash/Maya orders start at `payment_status: "pending_verification"`.
 2. Staff or the owner checks the payment against the branch's published
    GCash/Maya account and calls `POST /api/orders/{id}/verify-payment` (no body
    needed) or `POST /api/orders/{id}/reject-payment` with an optional `reason`.
@@ -240,7 +240,10 @@ Delivered orders keep the price locked at order creation.
    written to the audit trail. The customer can then edit the pending order
    with a new `reference_no` to resubmit it.
 4. `approve` and `deliver` return `409 payment_not_verified` if a GCash/Maya
-   order is not `verified` (including when it is `rejected`).
+   order is not `verified` (including when it is `rejected`). Cash orders need
+   no verification call: `deliver` records the collecting user in
+   `payment_verified_by`, stamps `payment_verified_at` and sets
+   `payment_status: "paid"` in the same transaction as the sale.
 
 Verification calls on cash orders return `409 payment_not_required`; calls
 when no reference has been submitted (or the status is not
@@ -405,8 +408,9 @@ on the `order` entity.
 ## Status values
 
 - Orders (fulfilment): `pending`, `approved`, `delivered`, `cancelled`.
-- Orders (payment): `unpaid` (cash/COD), `pending_verification`,
-  `verified`, `rejected`.
+- Orders (payment): `unpaid` (cash/COD before delivery),
+  `pending_verification`, `verified` (GCash/Maya), `rejected`, `paid` (cash/COD
+  after delivery).
 - Payment method: `cash`, `gcash`, `maya`. There is no `credit`, `bank` or
   `other` method.
 - Transfers: `requested`, `approved`, `in_transit`, `received`, `cancelled`.

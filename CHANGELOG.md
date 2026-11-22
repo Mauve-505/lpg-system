@@ -2,7 +2,23 @@
 
 All notable changes to this project are recorded here.
 
-## Unreleased / Phase 3 — Hygiene and deployment safety
+## Phase 4 — COD payment settlement
+
+### Changed
+
+- Delivering a cash/COD order now settles it in the same transaction: the order
+  moves to `payment_status: paid`, and `payment_verified_by` /
+  `payment_verified_at` record the user who collected the cash. Customers no
+  longer see a delivered COD order as `unpaid`.
+- GCash/Maya orders are unchanged: they still require staff verification and
+  remain `verified` after delivery.
+
+### Migration
+
+- Migration `009_cod_paid_on_delivery` adds the `paid` payment status and
+  backfills delivered cash orders that the earlier workflow left `unpaid`.
+
+## Phase 3 — Hygiene and deployment safety
 
 ### Added
 
