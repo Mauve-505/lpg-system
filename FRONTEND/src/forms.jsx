@@ -122,6 +122,59 @@ function linePrice(line, sizes) {
   return Number(size?.selling_price || 0)
 }
 
+const PAY_METHODS = [
+  { value: 'cash', label: 'Cash (COD)' },
+  { value: 'gcash', label: 'GCash' },
+  { value: 'maya', label: 'Maya' },
+]
+
+const REFERENCE_PATTERN = '[A-Za-z0-9._:-]{4,80}'
+
+/** Staff verify every prepaid reference before an order can be approved. */
+function checkedReference(method, reference) {
+  if (method === 'cash') return ''
+  const value = String(reference || '').trim()
+  if (value.length < 4 || value.length > 80 || !/^[A-Za-z0-9._:-]+$/.test(value)) {
+    throw new Error('Enter a valid reference number (4-80 letters, numbers, dots, underscores, colons or hyphens).')
+  }
+  return value
+}
+
+function PaymentSelect({ value, onChange }) {
+  return (
+    <select value={value} onChange={e => onChange(e.target.value)}>
+      {PAY_METHODS.map(m => <option key={m.value} value={m.value}>{m.label}</option>)}
+    </select>
+  )
+}
+
+function PrepaidAccountNote({ branch, method }) {
+  if (!branch || method === 'cash') return null
+  const gcash = method === 'gcash'
+  const number = gcash ? branch.gcash_number : branch.maya_number
+  const name = gcash ? branch.gcash_account_name : branch.maya_account_name
+  return (
+    <p className="hint full">
+      Pay via {gcash ? 'GCash' : 'Maya'} to <b>{number || 'the account published by this branch'}</b>
+      {name ? ` (${name})` : ''}. Use the reference number from your payment confirmation;
+      branch staff verify prepaid references.
+    </p>
+  )
+}
+
+function citiesText(value) {
+  if (Array.isArray(value)) return value.join(', ')
+  if (value === null || value === undefined || value === '') return ''
+  const text = String(value)
+  if (text.trim().startsWith('[')) {
+    try {
+      const parsed = JSON.parse(text)
+      if (Array.isArray(parsed)) return parsed.join(', ')
+    } catch { /* plain text is also accepted */ }
+  }
+  return text
+}
+
 function LineEditor({ kind, sizes, lines, update, add, remove, showPrice = false, showBack = false, showDeposit = false, label = 'Cylinder size' }) {
   return (
     <div className="line-editor full">
@@ -269,18 +322,20 @@ export function ChangePasswordForm({ onClose }) {
 /* -------------------------------------------------------------------------- */
 
 export function SaleForm({ onClose }) {
-  const { sizes, customers, me, tr } = useApp()
+  const { sizes, customers, me, tr, branches } = useApp()
   const write = useWriteBranch()
   const done = useDone(onClose)
   const { lines, update, add, remove } = useLines(null, 'sale')
   const [pay, setPay] = useState('cash')
+  const [reference, setReference] = useState('')
   const [customerId, setCustomerId] = useState('')
   const total = lines.reduce((sum, l) => sum + (Number(l.qty) || 0) * linePrice(l, sizes), 0)
 
   const chosen = customers.find(c => String(c.id) === String(customerId))
+  const paymentBranch = branches.find(b => String(b.id) === String(write.branchId || me?.branch_id || ''))
 
   async function submit(f) {
-    if (pay === 'credit' && !customerId) throw new Error('Choose a customer for a credit sale.')
+    const referenceNo = checkedReference(pay, reference)
     const items = lines.map(l => ({
       size_id: Number(l.size_id),
       qty: Number(l.qty),
@@ -291,6 +346,7 @@ export function SaleForm({ onClose }) {
       date: f.date,
       customer_id: customerId ? Number(customerId) : null,
       pay,
+      ...(referenceNo ? { reference_no: referenceNo } : {}),
       items,
     }))
     done('Sale recorded')
@@ -301,18 +357,31 @@ export function SaleForm({ onClose }) {
       <BranchField write={write} />
       <label>{tr('common.date')}<input type="date" name="date" defaultValue={today()} required /></label>
       <label>Payment
-        <select value={pay} onChange={e => setPay(e.target.value)}>
-          <option value="cash">Cash</option>
-          <option value="credit">Credit (utang)</option>
-        </select>
+        <PaymentSelect value={pay} onChange={value => { setPay(value); setReference('') }} />
       </label>
-      <label className="full">Customer
+      <PrepaidAccountNote branch={paymentBranch} method={pay} />
+      {pay !== 'cash' && (
+        <label className="full">Reference number
+          <input
+            name="reference_no"
+            value={reference}
+            onChange={e => setReference(e.target.value)}
+            pattern={REFERENCE_PATTERN}
+            minLength={4}
+            maxLength={80}
+            placeholder="GCash/Maya transaction reference"
+            required
+          />
+          <span className="hint">From the payment confirmation; staff verify this reference.</span>
+        </label>
+      )}
+      <label className="full">Customer (optional)
         <select value={customerId} onChange={e => setCustomerId(e.target.value)}>
           <option value="">Walk-in{customers.length ? '' : ' (add a customer first)'}</option>
           {customers.map(c => <option key={c.id} value={c.id}>{c.name}{c.contact ? ` · ${c.contact}` : ''}</option>)}
         </select>
       </label>
-      {chosen && <p className="hint full">Current balance at this branch: <b>{peso(chosen.balance)}</b> · empties owed: <b>{chosen.empties_owed ?? 0}</b></p>}
+      {chosen && <p className="hint full">Empties owed: <b>{chosen.empties_owed ?? 0}</b></p>}
       {me?.role !== 'owner' ? null : <p className="hint full">Prices default to the branch price list. You may override a line for a negotiated sale.</p>}
       <LineEditor kind="sale" sizes={sizes} lines={lines} update={update} add={add} remove={remove} showPrice showBack />
       <p className="total full">Total: {peso(total)}</p>
@@ -357,7 +426,7 @@ export function DeliveryForm({ onClose }) {
 }
 
 /* -------------------------------------------------------------------------- */
-/* Customers and payments                                                     */
+/* Customers                                                                  */
 /* -------------------------------------------------------------------------- */
 
 export function CustomerForm({ customer, onClose }) {
@@ -370,9 +439,6 @@ export function CustomerForm({ customer, onClose }) {
       ...nameBody(f),
       ...addressBody(f),
       contact: f.contact,
-      credit_limit: f.credit_limit === '' ? null : Number(f.credit_limit),
-      is_reseller: f.is_reseller === 'on',
-      reseller_status: f.reseller_status || 'none',
     }
     if (customer) {
       // Only the owner may reassign a customer's home branch.
@@ -399,79 +465,13 @@ export function CustomerForm({ customer, onClose }) {
               ))}
             </select>
           </label>
-          <p className="hint">The customer's contact and credit details are shared across all branches.</p>
+          <p className="hint">The customer's contact and address details are shared across all branches.</p>
         </div>
       )}
       <PersonNameFields value={customer || {}} required={!customer} autoFocus />
       <label>Contact number<input name="contact" maxLength={50} defaultValue={customer?.contact || ''} /></label>
       <AddressFields value={customer || {}} label="Address / area" idPrefix="customer-address" />
-      <label>Credit limit (₱)
-        <input type="number" name="credit_limit" min="0" step="0.01" defaultValue={customer?.credit_limit ?? ''} placeholder="No limit" />
-      </label>
-      <label>Reseller status
-        <select name="reseller_status" defaultValue={customer?.reseller_status || 'none'}>
-          <option value="none">Not a reseller</option>
-          <option value="pending">Pending review</option>
-          <option value="approved">Approved reseller</option>
-          <option value="rejected">Rejected</option>
-        </select>
-      </label>
-      <label className="check full">
-        <input type="checkbox" name="is_reseller" defaultChecked={Boolean(customer?.is_reseller)} />
-        This customer buys for resale
-      </label>
-      <p className="hint full">Credit limits apply per branch and are enforced when orders or credit sales are recorded.</p>
-    </Modal>
-  )
-}
-
-export function PaymentForm({ customerId = '', onClose }) {
-  const { customers, tr } = useApp()
-  const write = useWriteBranch()
-  const done = useDone(onClose)
-  const [selected, setSelected] = useState(customerId ? String(customerId) : '')
-  const customer = customers.find(c => String(c.id) === String(selected))
-
-  async function submit(f) {
-    if (!selected) throw new Error('Choose a customer.')
-    const amount = Number(f.amount)
-    if (customer && amount > Number(customer.balance || 0) + 0.001) {
-      throw new Error('Payment cannot exceed the outstanding balance of ' + peso(customer.balance) + '.')
-    }
-    await write.run(() => post('payments', {
-      customer_id: Number(selected),
-      date: f.date,
-      amount,
-      method: f.method,
-      reference_no: f.reference_no,
-      notes: f.notes,
-    }))
-    done('Payment recorded')
-  }
-
-  return (
-    <Modal title="Record a payment" submit="Save payment" onClose={onClose} onSubmit={submit}>
-      <BranchField write={write} />
-      <label className="full">Customer
-        <select value={selected} onChange={e => setSelected(e.target.value)} required>
-          <option value="">Choose customer</option>
-          {customers.map(c => <option key={c.id} value={c.id}>{c.name} · {peso(c.balance)} owed</option>)}
-        </select>
-      </label>
-      {customer && <p className="hint full">Outstanding at this branch: <b>{peso(customer.balance)}</b>.</p>}
-      <label>{tr('common.date')}<input type="date" name="date" defaultValue={today()} required /></label>
-      <label>Amount (₱)<input type="number" name="amount" min="0.01" step="0.01" max={customer ? Number(customer.balance) : undefined} required /></label>
-      <label>Method
-        <select name="method" defaultValue="cash">
-          <option value="cash">Cash</option>
-          <option value="gcash">GCash</option>
-          <option value="maya">Maya</option>
-          <option value="bank">Bank transfer</option>
-          <option value="other">Other</option>
-        </select>
-      </label>
-      <label>Reference no.<input name="reference_no" maxLength={80} /></label>
-      <label className="full">Notes<input name="notes" maxLength={200} /></label>
+      <p className="hint full">Customer details are shared across all branches; empty cylinder counts are tracked per branch.</p>
     </Modal>
   )
 }
@@ -628,7 +628,12 @@ export function BranchForm({ branch, onClose }) {
       code: f.code,
       ...addressBody(f),
       contact_phone: f.contact_phone,
+      gcash_number: f.gcash_number,
+      gcash_account_name: f.gcash_account_name,
+      maya_number: f.maya_number,
+      maya_account_name: f.maya_account_name,
       service_area_notes: f.service_area_notes,
+      service_area_cities: f.service_area_cities,
       operating_hours: f.operating_hours,
       cutoff_time: f.cutoff_time,
       max_order_qty: Number(f.max_order_qty) || 1,
@@ -664,12 +669,27 @@ export function BranchForm({ branch, onClose }) {
       <label>Outside-zone fee (₱)
         <input type="number" name="outside_zone_fee" min="0" step="0.01" defaultValue={branch?.outside_zone_fee ?? 0} />
       </label>
+      <label>GCash number<input name="gcash_number" maxLength={80} defaultValue={branch?.gcash_number || ''} /></label>
+      <label>GCash account name<input name="gcash_account_name" maxLength={100} defaultValue={branch?.gcash_account_name || ''} /></label>
+      <label>Maya number<input name="maya_number" maxLength={80} defaultValue={branch?.maya_number || ''} /></label>
+      <label>Maya account name<input name="maya_account_name" maxLength={100} defaultValue={branch?.maya_account_name || ''} /></label>
+      <label className="full">Service area cities
+        <input
+          name="service_area_cities"
+          maxLength={500}
+          defaultValue={citiesText(branch?.service_area_cities)}
+          placeholder="e.g. Manila, Quezon City, Pasig"
+        />
+        <span className="hint">Separate cities with commas. Customers see these as the branch's delivery area.</span>
+      </label>
       <label className="full">Service area notes
         <textarea name="service_area_notes" rows={3} maxLength={500} defaultValue={branch?.service_area_notes || ''} />
       </label>
       <p className="hint full">
-        Rush and outside-zone fees are added to a customer order when the corresponding option is chosen.
-        Rush orders are delivered today and ignore the same-day cut-off. Set a fee to 0 to offer that add-on for free.
+        GCash and Maya account details are shown to customers choosing prepaid payment; staff verify the
+        reference number. Rush and outside-zone fees are added to a customer order when the corresponding
+        option is chosen. Rush orders are delivered today and ignore the same-day cut-off. Set a fee to 0
+        to offer that add-on for free.
       </p>
     </Modal>
   )
@@ -1054,7 +1074,8 @@ export function OrderForm({ order, onClose }) {
   const [sizes, setSizes] = useState(order ? globalSizes : [])
   const [loadingSizes, setLoadingSizes] = useState(false)
   const { lines, setLines, update, add, remove } = useLines(order?.items || null, 'order')
-  const [pay, setPay] = useState(order?.payment_type || 'cash')
+  const [pay, setPay] = useState(PAY_METHODS.some(m => m.value === order?.payment_method) ? order.payment_method : 'cash')
+  const [reference, setReference] = useState(order?.payment_reference || '')
   const [rush, setRush] = useState(Number(order?.is_rush) === 1)
   const [outside, setOutside] = useState(Number(order?.is_outside_zone) === 1)
 
@@ -1108,6 +1129,7 @@ export function OrderForm({ order, onClose }) {
 
   async function submit(f) {
     if (!branchId) throw new Error('Choose a branch.')
+    const referenceNo = checkedReference(pay, reference)
     if (!rush && requested === today() && cutoffPassed(branch)) {
       throw new Error(
         `Same-day orders for ${branch.name} closed at ${String(branch.cutoff_time).slice(0, 5)}. ` +
@@ -1122,6 +1144,7 @@ export function OrderForm({ order, onClose }) {
     const body = {
       branch_id: Number(branchId),
       pay,
+      ...(referenceNo ? { reference_no: referenceNo } : {}),
       notes: f.notes,
       requested_date: rush ? today() : (f.requested_date || requested),
       time_slot: f.time_slot,
@@ -1179,11 +1202,24 @@ export function OrderForm({ order, onClose }) {
           : ''}
       </p>
       <label>Payment
-        <select value={pay} onChange={e => setPay(e.target.value)}>
-          <option value="cash">Cash on delivery</option>
-          <option value="credit">Credit (utang)</option>
-        </select>
+        <PaymentSelect value={pay} onChange={value => { setPay(value); setReference('') }} />
       </label>
+      <PrepaidAccountNote branch={branch} method={pay} />
+      {pay !== 'cash' && (
+        <label className="full">Reference number
+          <input
+            name="reference_no"
+            value={reference}
+            onChange={e => setReference(e.target.value)}
+            pattern={REFERENCE_PATTERN}
+            minLength={4}
+            maxLength={80}
+            placeholder="Transaction reference from your receipt"
+            required
+          />
+          <span className="hint">Use the reference from your GCash or Maya confirmation. Staff verify it before approving the order.</span>
+        </label>
+      )}
       <label>Valve type
         <select name="valve_type" defaultValue={order?.valve_type || 'na'}>
           <option value="na">Not sure / not applicable</option>
@@ -1207,6 +1243,32 @@ export function OrderForm({ order, onClose }) {
       <LineEditor kind="order" sizes={sizes} lines={lines} update={update} add={add} remove={remove} showPrice showDeposit />
       <p className="total full">Estimated total: {peso(total)}</p>
       <p className="hint full">Final prices are set by the branch when the order is approved. {order ? 'Only pending orders can be edited.' : ''}</p>
+    </Modal>
+  )
+}
+
+/** Staff verification for GCash/Maya order references. Reject reason is optional. */
+export function PaymentDecisionForm({ order, action, onClose }) {
+  const done = useDone(onClose)
+  const reject = action === 'reject'
+  const path = `orders/${order.id}/${reject ? 'reject-payment' : 'verify-payment'}`
+
+  return (
+    <Modal
+      title={reject ? 'Reject this payment?' : 'Verify this payment?'}
+      submit={reject ? 'Reject payment' : 'Verify payment'}
+      danger={reject}
+      onClose={onClose}
+      onSubmit={async f => {
+        await withBranch(order.branch_id, () => post(path, reject && f.reason ? { reason: f.reason } : {}))
+        done(reject ? 'Payment rejected' : 'Payment verified')
+      }}
+    >
+      <p className="full">
+        {order.order_no ? `Order ${order.order_no} · ` : ''}Reference:{' '}
+        <b className="mono">{order.payment_reference || '—'}</b>
+      </p>
+      {reject && <label className="full">Reason (optional)<input name="reason" maxLength={200} autoFocus /></label>}
     </Modal>
   )
 }
@@ -1421,7 +1483,9 @@ export function ReceiptModal({ saleId, onClose }) {
             <div><dt>Receipt</dt><dd>{data.sale_no}</dd></div>
             <div><dt>{formatDate('') === '—' ? 'Date' : 'Date'}</dt><dd>{formatDate(data.sale_date)}</dd></div>
             <div><dt>Customer</dt><dd>{data.customer || 'Walk-in'}</dd></div>
-            <div><dt>Payment</dt><dd>{data.payment_type}</dd></div>
+            <div><dt>Payment method</dt><dd>{data.payment_method || 'cash'}</dd></div>
+            {data.payment_reference && <div><dt>Reference</dt><dd className="mono">{data.payment_reference}</dd></div>}
+            {data.payment_status && <div><dt>Payment status</dt><dd>{String(data.payment_status).replaceAll('_', ' ')}</dd></div>}
           </dl>
           <table>
             <thead><tr><th>Item</th><th className="r">Qty</th><th className="r">Price</th><th className="r">Total</th></tr></thead>

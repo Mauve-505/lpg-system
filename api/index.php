@@ -85,7 +85,6 @@ $routes = [
     ['PATCH', '#^my/orders/(\d+)$#', 'api_my_order_update'],
     ['PUT', '#^my/orders/(\d+)$#', 'api_my_order_update'],
     ['POST', '#^my/orders/(\d+)/cancel$#', 'api_my_order_cancel'],
-    ['GET', '#^my/payments$#', 'api_my_payments'],
 
     ['GET', '#^dashboard$#', 'api_dashboard'],
 
@@ -93,10 +92,6 @@ $routes = [
     ['POST', '#^customers$#', 'api_customers_create'],
     ['PUT', '#^customers/(\d+)$#', 'api_customers_update'],
     ['DELETE', '#^customers/(\d+)$#', 'api_customers_delete'],
-
-    ['GET', '#^payments$#', 'api_payments_list'],
-    ['POST', '#^payments$#', 'api_payments_create'],
-    ['DELETE', '#^payments/(\d+)$#', 'api_payments_void'],
 
     ['GET', '#^deliveries$#', 'api_deliveries_list'],
     ['POST', '#^deliveries$#', 'api_deliveries_create'],
@@ -111,6 +106,8 @@ $routes = [
     ['GET', '#^orders$#', 'api_orders_list'],
     ['GET', '#^orders/(\d+)$#', 'api_order_show'],
     ['POST', '#^orders/(\d+)/approve$#', 'api_order_approve'],
+    ['POST', '#^orders/(\d+)/verify-payment$#', 'api_order_verify_payment'],
+    ['POST', '#^orders/(\d+)/reject-payment$#', 'api_order_reject_payment'],
     ['POST', '#^orders/(\d+)/cancel$#', 'api_order_cancel'],
     ['POST', '#^orders/(\d+)/deliver$#', 'api_order_deliver'],
     ['POST', '#^orders/(\d+)/assign$#', 'api_order_assign'],
@@ -149,7 +146,6 @@ $routes = [
 
     ['GET', '#^reports/daily$#', 'api_report_daily'],
     ['GET', '#^reports/sales$#', 'api_report_sales'],
-    ['GET', '#^reports/unpaid$#', 'api_report_unpaid'],
     ['GET', '#^reports/empties$#', 'api_report_empties'],
     ['GET', '#^reports/stock$#', 'api_report_stock'],
     ['GET', '#^reports/branch-comparison$#', 'api_report_branch_comparison'],

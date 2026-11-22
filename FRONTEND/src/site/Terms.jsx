@@ -21,8 +21,8 @@ export default function Terms() {
         <h2>2. The service</h2>
         <p>
           The service lets customers order LPG from a branch, and lets authorised
-          staff record sales, plant deliveries, stock movements, payments, and
-          transfers between branches. It is an ordering and record-keeping tool. It
+          staff record sales, plant deliveries, stock movements, payment verification,
+          and transfers between branches. It is an ordering and record-keeping tool. It
           does not itself supply gas, transport cylinders, or guarantee that a
           particular size, price, time slot, or delivery area is available.
         </p>
@@ -46,8 +46,8 @@ export default function Terms() {
           recorded with an approved order is the price for that order unless both
           sides agree to a correction. An order is not accepted until the branch
           approves it. We may decline or cancel an order because of stock, delivery
-          area, safety concerns, incorrect pricing, suspected fraud, or a credit
-          limit.
+          area, safety concerns, incorrect pricing, suspected fraud, or an unverified
+          prepaid payment reference.
         </p>
         <p>
           Cut-off times, maximum quantities, and delivery days are branch-specific.
@@ -57,14 +57,15 @@ export default function Terms() {
       </section>
 
       <section>
-        <h2>5. Payment and credit</h2>
+        <h2>5. Payment</h2>
         <p>
-          You may pay by cash on delivery or another method the branch accepts.
-          Credit is available only when the branch grants it, and only within any
-          approved limit. You are responsible for amounts charged to your account.
-          Payments are recorded against the branch where they are received. If you
-          believe a payment or balance is wrong, contact the branch promptly so it
-          can be checked.
+          You may pay cash on delivery, or pay in advance through the GCash or Maya
+          account published by your branch and enter the payment reference with your
+          order. Staff check prepaid references manually; an order paid by GCash or
+          Maya is not approved until that reference is verified. Deposits and any
+          rush or outside-zone fees are set by the branch and shown as estimates when
+          you order. If you believe a payment reference or status is wrong, contact
+          the branch promptly so it can be checked.
         </p>
       </section>
 
@@ -167,7 +168,7 @@ export default function Terms() {
       <section>
         <h2>14. Contact</h2>
         <p>
-          For questions about these terms, orders, payments, or deliveries, contact{' '}
+          For questions about these terms, orders, payment verification, or deliveries, contact{' '}
           {SITE.owner} using the contact details published on this website. For
           privacy requests, see our Privacy Policy.
         </p>

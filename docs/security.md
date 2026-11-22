@@ -11,7 +11,8 @@ changes to authentication, branch scoping, stock logic or the web-server config.
 Primary risks for an LPG distributor system:
 
 - unauthorised access to customer, staff or financial data;
-- tampering with stock, prices, payments or branch records;
+- tampering with stock, prices, payment verification or branch records;
+- replaying one payment reference across orders or sales;
 - one branch reading or changing another branch's data;
 - stolen credentials or session hijacking;
 - brute-force and credential-stuffing attacks;
@@ -142,7 +143,7 @@ Roles:
 
 - `owner` — all branches, all administrative functions.
 - `staff` — exactly one branch, operational functions for that branch.
-- `customer` — own account, own orders, own payments.
+- `customer` — own account and own orders only.
 
 Enforcement:
 
@@ -157,13 +158,17 @@ Enforcement:
   `400 branch_required`; inactive returns `409 branch_inactive`.
 - Cross-branch order/transfer actions use `require_branch_access()` and return
   `403 branch_forbidden`.
-- Customer order and payment queries filter by the customer's own ID.
+- Customer order queries filter by the customer's own ID.
 - Staff cannot list users, create branches, or read the audit trail.
 - Customers cannot read the sales register, users, reports or audit trail.
 - Customer records are branch-scoped for staff: an update or deactivation is
   rejected with `403 branch_forbidden` unless the customer's home branch is the
-  staff member's branch, or the customer has a sale, order or payment in that
-  branch. Only the owner may reassign `customers.branch_id`.
+  staff member's branch, or the customer has a sale or order in that branch.
+  Only the owner may reassign `customers.branch_id`.
+- Payment verification actions (`verify-payment`, `reject-payment`) use the same
+  branch check: staff can act only on orders in their own branch, and the owner
+  must select one concrete active branch. Verification is never inferred from a
+  client-supplied branch header.
 
 Tests cover the important combinations: staff sending a different branch
 header, owner `all` vs one branch, cross-branch order approval, wrong-branch
@@ -179,13 +184,30 @@ data isolation.
   both consume the same last cylinder.
 - Stock cannot go negative; overselling returns `409 insufficient_stock` and
   rolls back.
-- Sales, deliveries, payments and adjustments are **voided/reversed**, not
-  hard-deleted. Voids require a reason and write a reversal ledger row.
+- Sales, deliveries and adjustments are **voided/reversed**, not hard-deleted.
+  Voids require a reason and write a reversal ledger row.
 - Order prices are locked at order creation. Changing branch prices later does
-  not rewrite pending or delivered order totals.
-- Payments are validated against the customer's outstanding balance:
-  overpayment returns `422 payment_too_large`; zero balance returns
-  `409 no_balance`.
+  not rewrite pending or delivered order totals. Prices, cylinder deposits and
+  delivery fees are computed server-only; client-supplied amounts are not
+  trusted.
+- Prepaid payment methods only: `cash` (cash on delivery), `gcash`, `maya`.
+  Cash needs no verification. A GCash/Maya order starts at
+  `payment_status: pending_verification` when the customer supplies a 4–80
+  character `reference_no`, and cannot be approved or delivered until staff
+  verification sets it to `verified` (`409 payment_not_verified` otherwise).
+- Verify/reject run inside a transaction with the order row locked, are
+  branch-scoped, and require the reference to still be pending. Cash orders
+  return `409 payment_not_required`; orders with no submitted reference or no
+  pending status return `409 payment_not_submitted`. Rejection clears the
+  verifier fields, records an optional reason in the audit trail, and lets the
+  customer resubmit a new reference on the pending order.
+- Duplicate references are prevented by a unique key spanning both orders and
+  sales; a collision returns `409 duplicate_reference`. Replacing an order's
+  reference releases the previous one so a rejection can be corrected without
+  a database edit.
+- The legacy `payments` table is retained as **read-only historical data** only.
+  The write/list endpoints were removed; there is no balance ledger or
+  record-payment flow to manipulate.
 - Transfers use a state machine: `requested → approved → in_transit → received`
   or `cancelled` before shipping. Reposting a create with the same
   `idempotency_key` returns the existing transfer instead of duplicating stock.
@@ -193,8 +215,8 @@ data isolation.
   nonzero stock, active staff, or is the last active branch.
 - Audit entries are written for privileged and financial actions: logins,
   logouts, registrations, password changes/resets, branch and price changes,
-  users, customers, sales, voids, payments, deliveries, adjustments, orders and
-  transfers.
+  users, customers, sales, voids, deliveries, adjustments, orders, transfers
+  and payment verification (`verify_payment`, `reject_payment`).
 
 ## 9. Error handling and logging
 
@@ -235,7 +257,8 @@ All should return `403` or `404`, never the file contents.
 ## 11. Privacy and data protection
 
 - The system stores names, usernames, mobile numbers, delivery addresses,
-  order history, payments, balances and empties owed.
+  order and sale history, GCash/Maya payment references, verification actor and
+  timestamp, and empties owed.
 - Access is role- and branch-scoped; customers only see their own records.
 - Passwords are hashed; OTP and reset tokens are hashed with a server secret.
 - The audit trail records who changed what and when.
@@ -256,15 +279,16 @@ All should return `403` or `404`, never the file contents.
 | Owner-assisted password reset only | Add a rate-limited, expiring, single-use reset flow if customers need self-service. |
 | No 2FA | Add TOTP for owner accounts first. |
 | No file upload | `proof_of_delivery` is a text reference only. If uploads are added, validate type/size, store outside the web root, generate random names, and serve through an authorised handler. |
+| Manual payment verification | There is no gateway callback confirming a GCash/Maya transfer. Train verifiers to check the branch account and define an escalation path for disputed references. |
 | Audit is best-effort after commit | Use an outbox or write audit inside the transaction if regulatory auditability requires strict guarantees. |
 | File sessions are per-server | Use Redis/database sessions or sticky sessions for multiple app servers. |
-| No rate limit on every write endpoint | Add per-user/IP throttles for orders and payments if abuse appears. |
+| No rate limit on every write endpoint | Add per-user/IP throttles for orders and payment-reference submissions/verifications if abuse appears. |
 | No WAF / bot protection | Put the app behind a managed WAF or reverse proxy with rate limits. |
 | No dependency scanning in CI | Add `composer audit` (if Composer is added), `npm audit`, and secret scanning. |
 | CSP allows inline styles | Remove framer-motion or self-host fonts and tighten `style-src` when practical. |
 | PII not application-encrypted | Use disk/volume encryption, encrypted backups, and strict DB access. |
 | Tested on PHP 8.0.30 here | Run the suite on PHP 8.1/8.2/8.3 on staging/production. |
-| No external penetration test | Commission one before handling real customer and payment data. |
+| No external penetration test | Commission one before handling real customer and transaction data. |
 
 ## 13. Operational security
 
@@ -301,7 +325,8 @@ system owner; do not open a public issue with exploit details.
 - stock guards, oversell rejection and void reversal;
 - price locking and branch price overrides;
 - multi-item orders, pending edits, cancellation and quantity limits;
-- payments, overpayment and zero-balance rejection;
+- prepaid order creation, verification gating, duplicate-reference rejection,
+  rejection/resubmission and branch-scoped verification;
 - transfer state machine, cross-branch receipt and idempotency;
 - branch deactivation guards;
 - reports, CSV encoding and branch comparison;

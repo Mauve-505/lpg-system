@@ -307,74 +307,82 @@ function audit(?array $user, string $action, string $entity, $entityId, ?array $
     }
 }
 
-/** Balance of a customer for one branch (or all branches when $branchId null). */
-function customer_balance(int $customerId, ?int $branchId = null): array
+/** Cylinders still with a customer. Empties are not credit and remain tracked. */
+function customer_empties_owed(int $customerId, ?int $branchId = null): int
 {
-    $b = '';
-    $p = [$customerId];
+    $params = [$customerId];
+    $where = '';
     if ($branchId !== null) {
-        $b = ' AND s.branch_id = ?';
-        $p[] = $branchId;
+        $where = ' AND s.branch_id=?';
+        $params[] = $branchId;
     }
-    $sale = row(
-        "SELECT COALESCE(SUM(CASE WHEN s.payment_type='credit' THEN i.line_total ELSE 0 END),0) charged,
-                COALESCE(SUM(i.qty - i.empties_received),0) empties_owed
+    return (int) val(
+        "SELECT COALESCE(SUM(i.qty - i.empties_received),0)
          FROM sales s JOIN sale_items i ON i.sale_id=s.id
-         WHERE s.customer_id=? AND s.is_void=0{$b}",
-        $p
-    );
-    // Rush / outside-zone fees are charged once per sale, not once per line.
-    $fees = (float) val(
-        "SELECT COALESCE(SUM(s.rush_fee + s.outside_zone_fee),0) FROM sales s
-         WHERE s.customer_id=? AND s.is_void=0 AND s.payment_type='credit'{$b}",
-        $p,
+         WHERE s.customer_id=? AND s.is_void=0{$where}",
+        $params,
         0
     );
-    $pb = '';
-    $pp = [$customerId];
-    if ($branchId !== null) {
-        $pb = ' AND p.branch_id = ?';
-        $pp[] = $branchId;
-    }
-    $paid = (float) val("SELECT COALESCE(SUM(p.amount),0) FROM payments p WHERE p.customer_id=? AND p.is_void=0{$pb}", $pp, 0);
-    $charged = round((float) ($sale['charged'] ?? 0) + $fees, 2);
-    return [
-        'charged' => $charged,
-        'paid' => $paid,
-        'balance' => round($charged - $paid, 2),
-        'empties_owed' => (int) ($sale['empties_owed'] ?? 0),
-    ];
 }
 
-function customer_balances_by_branch(int $customerId): array
+/** Validate the prepaid payment method and its staff-verifiable reference. */
+function payment_input(): array
 {
-    $rows = rows(
-        "SELECT b.id branch_id, b.name branch_name,
-            COALESCE((SELECT SUM(CASE WHEN s.payment_type='credit' THEN i.line_total ELSE 0 END)
-                      FROM sales s JOIN sale_items i ON i.sale_id=s.id
-                      WHERE s.customer_id=? AND s.branch_id=b.id AND s.is_void=0),0)
-            + COALESCE((SELECT SUM(s.rush_fee + s.outside_zone_fee) FROM sales s
-                      WHERE s.customer_id=? AND s.branch_id=b.id AND s.is_void=0 AND s.payment_type='credit'),0) charged,
-            COALESCE((SELECT SUM(p.amount) FROM payments p
-                      WHERE p.customer_id=? AND p.branch_id=b.id AND p.is_void=0),0) paid,
-            COALESCE((SELECT SUM(i.qty-i.empties_received)
-                      FROM sales s JOIN sale_items i ON i.sale_id=s.id
-                      WHERE s.customer_id=? AND s.branch_id=b.id AND s.is_void=0),0) empties
-         FROM branches b
-         WHERE b.is_active=1
-            OR EXISTS (SELECT 1 FROM sales s2 WHERE s2.customer_id=? AND s2.branch_id=b.id)
-         ORDER BY b.name",
-        [$customerId, $customerId, $customerId, $customerId, $customerId]
-    );
-    foreach ($rows as &$r) {
-        $r['branch_id'] = (int) $r['branch_id'];
-        $r['charged'] = (float) $r['charged'];
-        $r['paid'] = (float) $r['paid'];
-        $r['balance'] = round($r['charged'] - $r['paid'], 2);
-        $r['empties_owed'] = (int) $r['empties'];
-        unset($r['charged'], $r['paid'], $r['empties']);
+    $method = input_enum('pay', 'Payment method', ['cash', 'gcash', 'maya']);
+    $reference = null;
+    if ($method !== 'cash') {
+        $reference = input_str(
+            'reference_no',
+            'Reference number',
+            4,
+            80,
+            true,
+            '/^[A-Za-z0-9][A-Za-z0-9._:-]*$/'
+        );
     }
-    return $rows;
+    return [$method, $reference];
+}
+
+/** Clear error code used by approve/deliver when a transfer is not verified. */
+function require_verified_payment(array $row): void
+{
+    if (!in_array($row['payment_method'] ?? 'cash', ['gcash', 'maya'], true)) {
+        return;
+    }
+    if (($row['payment_status'] ?? 'unpaid') !== 'verified') {
+        fail('This payment must be verified before the order can proceed.', 409, 'payment_not_verified', [
+            'payment_status' => $row['payment_status'] ?? 'unpaid',
+        ]);
+    }
+}
+
+/**
+ * Reserve a GCash/Maya reference exclusively. The unique key spans orders and
+ * sales, so a reference cannot be recycled across either resource.
+ */
+function reserve_payment_reference(string $method, ?string $reference, ?int $orderId = null, ?int $saleId = null): void
+{
+    if (!in_array($method, ['gcash', 'maya'], true) || $reference === null || $reference === '') {
+        return;
+    }
+    try {
+        q(
+            'INSERT INTO payment_references (method, reference_no, order_id, sale_id) VALUES (?,?,?,?)',
+            [$method, $reference, $orderId, $saleId]
+        );
+    } catch (PDOException $e) {
+        if ($e->getCode() === '23000') {
+            fail('That reference number has already been used.', 409, 'duplicate_reference', ['field' => 'reference_no']);
+        }
+        throw $e;
+    }
+}
+
+/** Replace the reference attached to an order after a staff rejection. */
+function replace_order_payment_reference(int $orderId, string $method, ?string $reference): void
+{
+    q('DELETE FROM payment_references WHERE order_id=?', [$orderId]);
+    reserve_payment_reference($method, $reference, $orderId, null);
 }
 
 function stock_balances(int $branchId, array $sizeIds): array

@@ -29,27 +29,17 @@ function api_dashboard(): void
         array_merge([$d], $sp),
         0
     );
-    $cashSales = (float) val(
-        "SELECT COALESCE(SUM(total_amount),0) FROM sales WHERE is_void=0 AND sale_date=? AND payment_type='cash'{$sc}",
-        array_merge([$d], $sp),
-        0
-    );
-    $payments = (float) val(
-        "SELECT COALESCE(SUM(amount),0) FROM payments WHERE is_void=0 AND payment_date=?{$sc}",
-        array_merge([$d], $sp),
-        0
-    );
-    [$scSales, $spSales] = scope_sql($scope, 's.branch_id');
-    [$scPay, $spPay] = scope_sql($scope, 'p.branch_id');
-    $unpaid = (float) val(
-        "SELECT COALESCE((SELECT SUM(i.line_total) FROM sales s JOIN sale_items i ON i.sale_id=s.id
-                          WHERE s.is_void=0 AND s.payment_type='credit'{$scSales}),0)
-              + COALESCE((SELECT SUM(s.rush_fee + s.outside_zone_fee) FROM sales s
-                          WHERE s.is_void=0 AND s.payment_type='credit'{$scSales}),0)
-              - COALESCE((SELECT SUM(p.amount) FROM payments p WHERE p.is_void=0{$scPay}),0)",
-        array_merge($spSales, $spSales, $spPay),
-        0
-    );
+    $methodTotals = ['cash' => 0.0, 'gcash' => 0.0, 'maya' => 0.0];
+    foreach (rows(
+        "SELECT payment_method, COALESCE(SUM(total_amount),0) total FROM sales
+         WHERE is_void=0 AND sale_date=?{$sc} GROUP BY payment_method",
+        array_merge([$d], $sp)
+    ) as $m) {
+        $key = (string) $m['payment_method'];
+        if (array_key_exists($key, $methodTotals)) {
+            $methodTotals[$key] = (float) $m['total'];
+        }
+    }
     $empties = (int) val(
         "SELECT COALESCE(SUM(i.qty-i.empties_received),0) FROM sales s JOIN sale_items i ON i.sale_id=s.id
          WHERE s.is_void=0{$sc}",
@@ -77,10 +67,9 @@ function api_dashboard(): void
         'branch' => $branch,
         'date' => $d,
         'sold' => money($sold),
-        'cash' => money($cashSales + $payments),
-        'cash_sales' => money($cashSales),
-        'payments' => money($payments),
-        'unpaid' => money(max(0, $unpaid)),
+        'cash' => money($methodTotals['cash']),
+        'gcash' => money($methodTotals['gcash']),
+        'maya' => money($methodTotals['maya']),
         'empties_owed' => $empties,
         'open_orders' => $openOrders,
         'stock' => $stockRows,

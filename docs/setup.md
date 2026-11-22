@@ -167,11 +167,14 @@ certifications, prices, statistics or contact details in these variables.
 3. Log in with the seeded owner account.
 4. Change the bootstrap password when prompted.
 5. Open **Branches** and set the real branch name, code, address, phone,
-   operating hours, cutoff time, service area and max order quantity.
-6. Open **Prices** / branch prices and replace the placeholder cylinder prices.
+   operating hours, cutoff time, service-area cities, max order quantity and
+   the GCash/Maya number and account name customers should pay.
+6. Open **Prices** / branch prices and replace the placeholder cylinder prices
+   and cylinder deposits.
 7. Create staff accounts assigned to their branch.
 8. Record opening stock with **Stock adjustments** for each branch and size.
-9. Create a test customer order, approve it, deliver it, and confirm the stock
+9. Create a test cash order and a test GCash order; verify the GCash reference
+   with a branch staff account, then approve and deliver both. Confirm stock
    and report totals move correctly.
 10. Delete or disable the demo data.
 
@@ -240,13 +243,18 @@ What the migration does:
 
 - Creates `branches`, `branch_prices`, `stock_locks`, `schema_migrations` and
   branch columns on existing tables.
-- Assigns all existing sales, orders, deliveries, payments, adjustments,
-  transfers and staff to **Main Branch (`MAIN`)** so historical totals do not
-  change.
+- Assigns all existing sales, orders, deliveries, adjustments, transfers and
+  staff to **Main Branch (`MAIN`)** so historical totals do not change.
 - Creates a stock-lock row per branch/size.
 - Adds an optional customer home branch (`002_customer_home_branch`) and
-  backfills it from each customer's earliest sale, order or payment.
-- Marks each migration as applied so it will not run twice.
+  backfills it from each customer's earliest sale or order.
+- Applies `005_prepaid_payments`: removes credit/reseller fields, adds the
+  payment-method and verification fields, and **refuses to run if any non-void
+  legacy credit sale still has an outstanding amount**. Settle those amounts
+  before running `migrate.php`; the refusal message names the problem. The old
+  payments table stays as read-only history.
+- Marks each applied migration so it will not run twice. Migrations 006 and 007
+  belong to later phases; their behaviour is not described here.
 
 `migrate.php` writes a `mysqldump` backup to `database/backups/` before
 applying anything. If `mysqldump` is not on `PATH`, set `db.mysqldump_path` in
@@ -262,7 +270,7 @@ applying anything. If `mysqldump` is not on `PATH`, set `db.mysqldump_path` in
 | `/api/health` returns an empty 500 | Check `api/logs/error.log`; usually a missing config value or DB error. |
 | Browser gets 419 on every save | Stale CSRF token. Refresh the page; the client retries once automatically. |
 | Login returns 403 `password_change_required` | The account must change its password first. Complete the change form. |
-| Staff cannot find a customer | Staff see only customers whose home branch is theirs or who have a sale/order/payment in their branch. The owner can reassign the home branch. |
+| Staff cannot find a customer | Staff see only customers whose home branch is theirs or who have a sale/order in their branch. The owner can reassign the home branch. |
 | Page is blank after build | Assets are referenced from `/assets`; deploy at the site root, or set Vite `base` and rebuild. |
 | `npm install` / build fails on Vite | Use the pinned `@vitejs/plugin-react` 6.x with Vite 8.x. Do not downgrade only one of them. |
 | Session lost on every request | The system temp directory (`lpg_sessions`) is not writable, or a reverse proxy is stripping cookies. |

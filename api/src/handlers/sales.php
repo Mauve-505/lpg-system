@@ -21,7 +21,8 @@ function sale_payload(array $s, array $items): array
         'sale_date' => $s['sale_date'],
         'customer_id' => $s['customer_id'] === null ? null : (int) $s['customer_id'],
         'customer' => $s['customer'] ?? 'Walk-in',
-        'payment_type' => $s['payment_type'],
+        'payment_method' => $s['payment_method'],
+        'payment_reference' => $s['payment_reference'] ?? null,
         'subtotal' => (float) $s['subtotal'],
         'deposit_total' => (float) $s['deposit_total'],
         'is_rush' => (int) ($s['is_rush'] ?? 0),
@@ -85,11 +86,11 @@ function api_sales_list(): void
     $where = '1=1' . $sc;
     $params = $sp;
 
-    if (($v = query_str('payment_type', 10)) !== '') {
-        if (!in_array($v, ['cash', 'credit'], true)) {
+    if (($v = query_str('payment_method', 13)) !== '') {
+        if (!in_array($v, ['cash', 'gcash', 'maya'], true)) {
             fail('Invalid payment filter.', 422, 'validation_error');
         }
-        $where .= ' AND s.payment_type=?';
+        $where .= ' AND s.payment_method=?';
         $params[] = $v;
     }
     if (($v = query_str('from', 10)) !== '') {
@@ -182,11 +183,8 @@ function api_sales_create(): void
     $branch = require_active_branch($branchId);
 
     $date = input_date('date', 'Sale date', false) ?: today();
-    $pay = input_enum('pay', 'Payment type', ['cash', 'credit']);
+    [$pay, $payReference] = payment_input();
     $customerId = input_int('customer_id', 'Customer', 1, null, false);
-    if ($pay === 'credit' && !$customerId) {
-        fail('Choose a customer for a credit sale.', 422, 'validation_error', ['field' => 'customer_id']);
-    }
     if ($customerId !== null) {
         $c = row('SELECT id, is_active FROM customers WHERE id=?', [$customerId]);
         if (!$c || (int) $c['is_active'] !== 1) {
@@ -199,7 +197,7 @@ function api_sales_create(): void
     $feeTotal = round($fees['rush_fee'] + $fees['outside_zone_fee'], 2);
 
     $items = parse_sale_items();
-    $result = tx(function () use ($u, $branchId, $date, $pay, $customerId, $items, $fees, $feeTotal) {
+    $result = tx(function () use ($u, $branchId, $date, $pay, $payReference, $customerId, $items, $fees, $feeTotal) {
         $sizeIds = array_map(static fn($x) => (int) $x['size_id'], $items);
         lock_stock($branchId, $sizeIds);
         $stock = stock_balances($branchId, $sizeIds);
@@ -219,28 +217,20 @@ function api_sales_create(): void
         $subtotal = array_sum(array_column($items, 'line_total'));
         $total = round($subtotal + $feeTotal, 2);
 
-        if ($pay === 'credit' && $customerId !== null) {
-            $cust = row('SELECT credit_limit FROM customers WHERE id=?', [$customerId]);
-            if ($cust && $cust['credit_limit'] !== null) {
-                $bal = customer_balance((int) $customerId, $branchId);
-                if ($bal['balance'] + $total > (float) $cust['credit_limit']) {
-                    fail('This sale would exceed the customer credit limit.', 409, 'credit_limit');
-                }
-            }
-        }
-
         q(
-            'INSERT INTO sales (branch_id, sale_date, customer_id, payment_type, subtotal, deposit_total,
-                is_rush, rush_fee, is_outside_zone, outside_zone_fee, total_amount, created_by)
-             VALUES (?,?,?,?,?,0,?,?,?,?,?,?)',
+            'INSERT INTO sales (branch_id, sale_date, customer_id, payment_method, payment_reference,
+                subtotal, deposit_total, is_rush, rush_fee, is_outside_zone, outside_zone_fee,
+                total_amount, created_by)
+             VALUES (?,?,?,?,?,?,0,?,?,?,?,?,?)',
             [
-                $branchId, $date, $customerId, $pay, $subtotal,
+                $branchId, $date, $customerId, $pay, $payReference, $subtotal,
                 $fees['is_rush'], $fees['rush_fee'], $fees['is_outside_zone'], $fees['outside_zone_fee'],
                 $total, (int) $u['id'],
             ]
         );
         $saleId = (int) db()->lastInsertId();
         q('UPDATE sales SET sale_no=? WHERE id=?', [doc_no('SALE', $date, $saleId), $saleId]);
+        reserve_payment_reference((string) $pay, $payReference, null, $saleId);
 
         foreach ($items as $it) {
             $sid = (int) $it['size_id'];
@@ -254,7 +244,7 @@ function api_sales_create(): void
         return ['id' => $saleId, 'subtotal' => $subtotal, 'total' => $total];
     });
 
-    audit($u, 'create', 'sale', $result['id'], null, ['total_amount' => $result['total'], 'payment_type' => $pay, 'branch_id' => $branchId], $branchId);
+    audit($u, 'create', 'sale', $result['id'], null, ['total_amount' => $result['total'], 'payment_method' => $pay, 'branch_id' => $branchId], $branchId);
     $s = load_sale_for_user($u, $result['id']);
     $items = sales_items_batch([$result['id']]);
     json_response(sale_payload($s, $items[$result['id']] ?? []), 201);

@@ -43,7 +43,7 @@ where it came from, and what must happen before launch.
 | 12 | “Cylinder stands upright and cannot tip over”, “connections checked with soapy water”, etc. | Safety checklist | Same as rows 5–10 | Safe as a customer checklist; add “follow your supplier’s instructions” |
 | 13 | “Prices, sizes and availability vary by branch.” | FAQ / branches | Internal business fact | Safe only if true; confirm |
 | 14 | “You can choose any active branch shown in the app.” | FAQ | System behaviour | True for the implemented app; confirm business policy |
-| 15 | “Credit availability is up to the branch.” | FAQ | System/business policy | Confirm credit policy |
+| 15 | “Pay cash on delivery, GCash or Maya; staff check GCash/Maya references before approval.” | FAQ | Implemented prepaid payment workflow + branch account details | Confirm the published account details and verifier assignments are correct |
 | 16 | “Dependable supply”, “careful service”, “safety first”, “practical tools” | Values | Aspirational brand values, not factual claims | Keep as values; do not turn into guarantees |
 | 17 | “Responsible energy use”, “operational efficiency”, “practical innovation”, “environmental responsibility” | Sustainability | General principles; no quantified benefit | Safe as principles; do not add “cleaner than…” |
 | 18 | “Live branch list from the API” | Our Branches | `GET /api/branches/public` | True; only active branches appear |
@@ -57,6 +57,8 @@ where it came from, and what must happen before launch.
   is current and displayed.
 - Any guaranteed delivery time, 24/7 availability or nationwide coverage.
 - Any savings percentage, price comparison or subsidy claim.
+- Any credit/utang, open-balance or "buy now, pay later" promise; payment is
+  cash on delivery or a verified GCash/Maya reference.
 - Any health claim beyond basic safety guidance.
 - Any customer testimonial or statistic that cannot be verified.
 

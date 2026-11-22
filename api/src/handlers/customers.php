@@ -3,20 +3,15 @@ declare(strict_types=1);
 
 function customer_payload(array $c, ?int $branchId): array
 {
-    $bal = customer_balance((int) $c['id'], $branchId);
     return array_merge([
         'id' => (int) $c['id'],
         'branch_id' => $c['branch_id'] === null ? null : (int) $c['branch_id'],
         'name' => $c['name'],
         'contact' => $c['contact'],
         'address' => $c['address'],
-        'credit_limit' => $c['credit_limit'] === null ? null : (float) $c['credit_limit'],
-        'is_reseller' => (int) $c['is_reseller'],
-        'reseller_status' => $c['reseller_status'],
         'is_active' => (int) $c['is_active'],
         'username' => $c['username'] ?? null,
-        'balance' => $bal['balance'],
-        'empties_owed' => $bal['empties_owed'],
+        'empties_owed' => customer_empties_owed((int) $c['id'], $branchId),
     ], person_name_payload($c), address_payload($c));
 }
 
@@ -24,7 +19,7 @@ function customer_payload(array $c, ?int $branchId): array
  * Staff may manage a customer when it is their home-branch customer or when
  * the customer has transacted with the staff member's branch. The owner may
  * manage every customer. Customer records are global: an allowed update
- * changes the contact/credit details that every branch sees.
+ * changes the contact/address details that every branch sees.
  */
 function can_manage_customer(array $u, array $c): bool
 {
@@ -40,9 +35,8 @@ function can_manage_customer(array $u, array $c): bool
     }
     return (int) val(
         'SELECT (SELECT COUNT(*) FROM sales WHERE customer_id=? AND branch_id=?)
-              + (SELECT COUNT(*) FROM orders WHERE customer_id=? AND branch_id=?)
-              + (SELECT COUNT(*) FROM payments WHERE customer_id=? AND branch_id=?)',
-        [(int) $c['id'], $branchId, (int) $c['id'], $branchId, (int) $c['id'], $branchId],
+              + (SELECT COUNT(*) FROM orders WHERE customer_id=? AND branch_id=?)',
+        [(int) $c['id'], $branchId, (int) $c['id'], $branchId],
         0
     ) > 0;
 }
@@ -73,9 +67,7 @@ function api_customers_list(): void
     if (in_array($u['role'], ['branch_admin', 'staff'], true)) {
         $where .= ' AND (c.branch_id=?
                      OR EXISTS (SELECT 1 FROM sales s WHERE s.customer_id=c.id AND s.branch_id=?)
-                     OR EXISTS (SELECT 1 FROM orders o WHERE o.customer_id=c.id AND o.branch_id=?)
-                     OR EXISTS (SELECT 1 FROM payments pm WHERE pm.customer_id=c.id AND pm.branch_id=?))';
-        $params[] = (int) $u['branch_id'];
+                     OR EXISTS (SELECT 1 FROM orders o WHERE o.customer_id=c.id AND o.branch_id=?))';
         $params[] = (int) $u['branch_id'];
         $params[] = (int) $u['branch_id'];
         $params[] = (int) $u['branch_id'];
@@ -101,21 +93,17 @@ function api_customers_create(): void
     $name = $person['name'];
     $contact = input_str('contact', 'Contact number', 0, 50, false);
     $address = address_input('', 'Address', false);
-    $creditLimit = input_decimal('credit_limit', 'Credit limit', 0, 10000000, false);
-    $isReseller = input_bool('is_reseller', false);
-    $resellerStatus = input_enum('reseller_status', 'Reseller status', ['none', 'pending', 'approved', 'rejected'], false) ?: 'none';
     $branchId = (int) $scope['id'];
 
     q(
         'INSERT INTO customers (branch_id, name, first_name, middle_name, last_name, name_suffix,
-            contact, address, street, barangay, city, province, region, postal_code, latitude, longitude,
-            credit_limit, is_reseller, reseller_status)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+            contact, address, street, barangay, city, province, region, postal_code, latitude, longitude)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
         [
             $branchId, $name, $person['first_name'], $person['middle_name'], $person['last_name'], $person['name_suffix'],
             $contact === '' ? null : $contact, $address['address'], $address['street'], $address['barangay'],
             $address['city'], $address['province'], $address['region'], $address['postal_code'],
-            $address['latitude'], $address['longitude'], $creditLimit, $isReseller ? 1 : 0, $resellerStatus,
+            $address['latitude'], $address['longitude'],
         ]
     );
     $id = (int) db()->lastInsertId();
@@ -153,13 +141,7 @@ function api_customers_update(array $params): void
             'longitude' => $c['longitude'],
         ];
     }
-    // Patch semantics: only touch the credit limit when the field was sent.
     $body = read_json_body();
-    $creditLimit = array_key_exists('credit_limit', $body)
-        ? input_decimal('credit_limit', 'Credit limit', 0, 10000000, false)
-        : ($c['credit_limit'] === null ? null : (float) $c['credit_limit']);
-    $isReseller = input_bool('is_reseller', (bool) $c['is_reseller']);
-    $resellerStatus = input_enum('reseller_status', 'Reseller status', ['none', 'pending', 'approved', 'rejected'], false) ?: $c['reseller_status'];
 
     // Only the owner may move a customer between home branches. Staff keep the
     // existing link and can only edit customers already visible to them.
@@ -174,12 +156,12 @@ function api_customers_update(array $params): void
     q(
         'UPDATE customers SET branch_id=?, name=?, first_name=?, middle_name=?, last_name=?, name_suffix=?,
             contact=?, address=?, street=?, barangay=?, city=?, province=?, region=?, postal_code=?,
-            latitude=?, longitude=?, credit_limit=?, is_reseller=?, reseller_status=? WHERE id=?',
+            latitude=?, longitude=? WHERE id=?',
         [
             $homeBranchId, $name, $person['first_name'], $person['middle_name'], $person['last_name'], $person['name_suffix'],
             $contact === '' ? null : $contact, $address['address'], $address['street'], $address['barangay'],
             $address['city'], $address['province'], $address['region'], $address['postal_code'],
-            $address['latitude'], $address['longitude'], $creditLimit, $isReseller ? 1 : 0, $resellerStatus, $id,
+            $address['latitude'], $address['longitude'], $id,
         ]
     );
     audit(

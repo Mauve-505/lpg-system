@@ -89,12 +89,17 @@ different node.
 
 The following are managed in the database, not in config files:
 
-- branch names, codes, addresses, phones, hours, cutoff times, service areas
-  and maximum order quantities (**Branches** page);
-- cylinder sizes and global prices (**Sizes**);
+- branch names, codes, addresses, phones, hours, cutoff times, service-area
+  cities, maximum order quantities, and GCash/Maya numbers and account names
+  (**Branches** page);
+- cylinder sizes, global prices and cylinder deposits (**Sizes**);
 - per-branch price overrides (**branch prices**);
 - stock quantities (via deliveries, sales, adjustments, transfers);
-- customers, staff, credit limits and account status.
+- customers, staff and account status.
+
+Payment methods (`cash`, `gcash`, `maya`) and the 4–80 character reference
+format are fixed by the application, not by config. There is no gateway
+credential to configure; verification is done by branch staff.
 
 ## Frontend build settings
 

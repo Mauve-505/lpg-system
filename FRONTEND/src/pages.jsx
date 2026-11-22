@@ -7,7 +7,7 @@ import {
 } from './ui'
 import {
   AdjustForm, AssignRiderForm, BranchAdminForm, BranchForm, BranchTeamModal, ConfirmDelete,
-  ConfirmPost, CustomerForm, DeliverForm, DeliveryForm, OrderForm, PaymentForm, PriceForm,
+  ConfirmPost, CustomerForm, DeliverForm, DeliveryForm, OrderForm, PaymentDecisionForm, PriceForm,
   ReasonPostForm, ReceiptModal, ResetPasswordForm, SaleForm, SizeForm, TeamMemberForm,
   TransferForm, UserForm, useVoid,
 } from './forms'
@@ -51,6 +51,33 @@ function branchColumn(me, activeBranch) {
   return me?.role === 'owner' && activeBranch === 'all'
 }
 
+function PaymentCell({ row }) {
+  return (
+    <>
+      <Badge t={row.payment_method || 'cash'} />
+      {row.payment_reference ? <small className="sub mono">{row.payment_reference}</small> : null}
+      {row.payment_status ? <small className="sub"><Badge t={row.payment_status} /></small> : null}
+    </>
+  )
+}
+
+function accountText(number, name) {
+  return [number, name].filter(Boolean).join(' · ') || '—'
+}
+
+function citiesText(value) {
+  if (Array.isArray(value)) return value.join(', ')
+  if (value === null || value === undefined || value === '') return '—'
+  const text = String(value)
+  if (text.trim().startsWith('[')) {
+    try {
+      const parsed = JSON.parse(text)
+      if (Array.isArray(parsed)) return parsed.join(', ')
+    } catch { /* plain text is also accepted */ }
+  }
+  return text
+}
+
 /* -------------------------------------------------------------------------- */
 /* Dashboard                                                                  */
 /* -------------------------------------------------------------------------- */
@@ -83,8 +110,7 @@ export function Dashboard() {
         <>
           <div className="stats">
             <Stat label="Sold today" value={peso(d.sold)} hint="Posted sales, excluding voids" />
-            <Stat label="Cash collected today" value={peso(d.cash)} hint="Cash sales plus credit payments" />
-            <Stat label="Unpaid by customers" value={peso(d.unpaid)} tone={Number(d.unpaid) > 0 ? 'warn' : 'ok'} hint="Outstanding credit balance" />
+            <Stat label="Cash sales today" value={peso(d.cash)} hint="Cash payments collected at delivery" />
             <Stat label="Open orders" value={num(d.open_orders)} hint="Pending or approved" />
             <Stat label="Empties with customers" value={num(d.empties_owed)} hint="Expected back from customers" />
           </div>
@@ -153,7 +179,7 @@ export function Dashboard() {
                 <td className="wrap">{itemsSummary(a.items)}</td>
                 <td className="r">{itemsQty(a.items)}</td>
                 <td className="r">{peso(a.total_amount)}</td>
-                <td><Badge t={a.payment_type} /></td>
+                <td><PaymentCell row={a} /></td>
                 <td>{Number(a.is_void) === 1 ? <Badge t="void" /> : <Badge t="delivered" label="Posted" />}</td>
               </tr>
             ))}
@@ -227,10 +253,16 @@ export function Orders() {
             </td>
             <td className="r">{peso(o.total_amount)}</td>
             <td>{dateFmt(o.requested_date)}{o.time_slot ? <small className="sub">{o.time_slot}</small> : null}</td>
-            <td><Badge t={o.payment_type} /></td>
+            <td><PaymentCell row={o} /></td>
             <td>{o.rider_name || '—'}</td>
             <td><Badge t={o.status} /></td>
             <Acts>
+              {canManage && ['gcash', 'maya'].includes(o.payment_method) && o.payment_status === 'pending_verification' && (
+                <>
+                  <button className="sm link-ac" onClick={() => setModal({ type: 'verify', order: o })}>Verify</button>
+                  <button className="sm link-danger" onClick={() => setModal({ type: 'reject', order: o })}>Reject</button>
+                </>
+              )}
               {canManage && o.status === 'pending' && (
                 <button className="sm link-ac" onClick={() => setModal({ type: 'approve', order: o })}>Approve</button>
               )}
@@ -274,6 +306,8 @@ export function Orders() {
       )}
       {modal?.type === 'assign' && <AssignRiderForm order={modal.order} onClose={close} />}
       {modal?.type === 'deliver' && <DeliverForm order={modal.order} onClose={close} />}
+      {modal?.type === 'verify' && <PaymentDecisionForm order={modal.order} action="verify" onClose={close} />}
+      {modal?.type === 'reject' && <PaymentDecisionForm order={modal.order} action="reject" onClose={close} />}
     </>
   )
 }
@@ -292,10 +326,10 @@ export function Sales() {
   const [receipt, setReceipt] = useState(null)
   const [voidBtn, voidModal] = useVoid()
   const showBranch = branchColumn(me, activeBranch)
-  const list = usePagedApi('sales' + query({ from, to, payment_type: pay, q }), { deps: [from, to, pay, q] })
+  const list = usePagedApi('sales' + query({ from, to, payment_method: pay, q }), { deps: [from, to, pay, q] })
 
   const reset = () => { setFrom(monthStart()); setTo(today()); setPay(''); setQ('') }
-  const exportPath = 'reports/sales' + query({ from, to, payment_type: pay, q })
+  const exportPath = 'reports/sales' + query({ from, to, payment_method: pay, q })
 
   return (
     <>
@@ -309,9 +343,10 @@ export function Sales() {
         <TextFilter value={q} onChange={setQ} placeholder="Sale no. or customer" />
         <label>Payment
           <select value={pay} onChange={e => setPay(e.target.value)}>
-            <option value="">All payments</option>
+            <option value="">All methods</option>
             <option value="cash">Cash</option>
-            <option value="credit">Credit</option>
+            <option value="gcash">GCash</option>
+            <option value="maya">Maya</option>
           </select>
         </label>
         <RangeFilter from={from} to={to} setFrom={setFrom} setTo={setTo} />
@@ -335,7 +370,7 @@ export function Sales() {
             <td className="wrap">{itemsSummary(a.items)}</td>
             <td className="r">{itemsQty(a.items)}</td>
             <td className="r">{peso(a.total_amount)}</td>
-            <td><Badge t={a.payment_type} /></td>
+            <td><PaymentCell row={a} /></td>
             <td>{Number(a.is_void) === 1 ? <Badge t="void" label="Void" /> : <Badge t="delivered" label="Posted" />}</td>
             <Acts>
               <button className="sm link-ac" onClick={() => setReceipt(a.id)}>Receipt</button>
@@ -348,63 +383,6 @@ export function Sales() {
 
       {open && <SaleForm onClose={() => setOpen(false)} />}
       {receipt && <ReceiptModal saleId={receipt} onClose={() => setReceipt(null)} />}
-      {voidModal}
-    </>
-  )
-}
-
-/* -------------------------------------------------------------------------- */
-/* Payments                                                                   */
-/* -------------------------------------------------------------------------- */
-
-export function Payments() {
-  const { me, tr, activeBranch } = useApp()
-  const [from, setFrom] = useState(monthStart)
-  const [to, setTo] = useState(today)
-  const [q, setQ] = useState('')
-  const [open, setOpen] = useState(false)
-  const [voidBtn, voidModal] = useVoid()
-  const showBranch = branchColumn(me, activeBranch)
-  const list = usePagedApi('payments' + query({ from, to, q }), { deps: [from, to, q] })
-
-  return (
-    <>
-      <PageHeader title={tr('nav.payments')} sub="Credit payments received from customers">
-        <button className="primary" onClick={() => setOpen(true)}>Record payment</button>
-      </PageHeader>
-      <ScopeNote />
-
-      <FilterBar onReset={() => { setFrom(monthStart()); setTo(today()); setQ('') }}>
-        <TextFilter value={q} onChange={setQ} placeholder="Payment no., reference or customer" />
-        <RangeFilter from={from} to={to} setFrom={setFrom} setTo={setTo} />
-      </FilterBar>
-
-      <Table
-        head={[
-          'Date', 'Payment no.', ...(showBranch ? ['Branch'] : []), 'Customer', 'Method',
-          'Reference', { t: 'Amount', r: true }, 'Status', 'Actions',
-        ]}
-        loading={list.loading}
-        error={list.error}
-        onRetry={list.reload}
-        empty="No payments match these filters."
-        rows={list.rows.map(p => (
-          <tr key={p.id} className={Number(p.is_void) === 1 ? 'row-void' : undefined}>
-            <td>{dateFmt(p.payment_date)}</td>
-            <td className="mono">{p.payment_no || '—'}</td>
-            {showBranch ? <td><BranchCell row={p} /></td> : null}
-            <td>{p.customer}</td>
-            <td><Badge t={p.method} label={p.method} /></td>
-            <td>{p.reference_no || '—'}</td>
-            <td className="r">{peso(p.amount)}</td>
-            <td>{Number(p.is_void) === 1 ? <Badge t="void" /> : <Badge t="active" label="Posted" />}</td>
-            <Acts>{Number(p.is_void) !== 1 && voidBtn(`payments/${p.id}`, { branchId: p.branch_id, text: 'Void this payment' })}</Acts>
-          </tr>
-        ))}
-      />
-      <Pagination page={list.page} pages={list.pages} total={list.total} onPage={list.setPage} />
-
-      {open && <PaymentForm onClose={() => setOpen(false)} />}
       {voidModal}
     </>
   )
@@ -484,8 +462,7 @@ export function Customers() {
 
   return (
     <>
-      <PageHeader title={tr('nav.customers')} sub="Balances and empty cylinders owed, scoped to the current branch view">
-        <button className="ghost" onClick={() => setModal({ type: 'pay', customerId: '' })}>Record payment</button>
+      <PageHeader title={tr('nav.customers')} sub="Contact details and empty cylinders owed, scoped to the current branch view">
         <button className="primary" onClick={() => setModal({ type: 'add' })}>Add customer</button>
       </PageHeader>
       <ScopeNote />
@@ -502,8 +479,7 @@ export function Customers() {
 
       <Table
         head={[
-          'Name', 'Contact', 'Area', { t: 'Credit limit', r: true }, { t: 'Unpaid', r: true },
-          { t: 'Empties owed', r: true }, 'Reseller', 'Status', 'Actions',
+          'Name', 'Contact', 'Area', { t: 'Empties owed', r: true }, 'Status', 'Actions',
         ]}
         loading={list.loading}
         error={list.error}
@@ -514,15 +490,9 @@ export function Customers() {
             <td><b>{c.name}</b>{c.username ? <small className="sub">@{c.username}</small> : null}</td>
             <td>{c.contact || '—'}</td>
             <td>{c.address || '—'}<MapLink lat={c.latitude} lng={c.longitude} title={'Customer location · ' + c.name} /></td>
-            <td className="r">{c.credit_limit === null ? 'No limit' : peso(c.credit_limit)}</td>
-            <td className={'r ' + (Number(c.balance) > 0 ? 'neg' : '')}>{peso(c.balance)}</td>
             <td className={'r ' + (Number(c.empties_owed) > 0 ? 'warn' : '')}>{num(c.empties_owed)}</td>
-            <td>
-              {Number(c.is_reseller) === 1 ? <Badge t={c.reseller_status || 'pending'} /> : <span className="muted">—</span>}
-            </td>
             <td>{Number(c.is_active) === 1 ? <Badge t="active" /> : <Badge t="inactive" />}</td>
             <Acts>
-              <button className="sm link-ac" onClick={() => setModal({ type: 'pay', customerId: String(c.id) })}>Pay</button>
               <button className="sm link-ac" onClick={() => setModal({ type: 'edit', customer: c })}>Edit</button>
               {Number(c.is_active) === 1 && (
                 <button className="sm link-danger" onClick={() => setModal({ type: 'deactivate', customer: c })}>Deactivate</button>
@@ -535,11 +505,10 @@ export function Customers() {
 
       {modal?.type === 'add' && <CustomerForm onClose={() => setModal(null)} />}
       {modal?.type === 'edit' && <CustomerForm customer={modal.customer} onClose={() => setModal(null)} />}
-      {modal?.type === 'pay' && <PaymentForm customerId={modal.customerId} onClose={() => setModal(null)} />}
       {modal?.type === 'deactivate' && (
         <ConfirmDelete
           title={'Deactivate ' + modal.customer.name + '?'}
-          text="Their login is disabled too. Sales and payment history stay in the ledger. Open orders must be resolved first."
+          text="Their login is disabled too. Sales and order history stay in the ledger. Open orders must be resolved first."
           submit="Deactivate customer"
           path={'customers/' + modal.customer.id}
           onClose={() => setModal(null)}
@@ -777,7 +746,6 @@ export function Transfers() {
 const REPORT_TABS = [
   { key: 'daily', label: 'Daily takings', path: 'reports/daily' },
   { key: 'sales', label: 'Sales register', path: 'reports/sales' },
-  { key: 'unpaid', label: 'Unpaid balances', path: 'reports/unpaid' },
   { key: 'empties', label: 'Empties owed', path: 'reports/empties' },
   { key: 'stock', label: 'Stock on hand', path: 'reports/stock' },
 ]
@@ -809,7 +777,7 @@ export function Reports() {
     ? { from, to }
     : active.key === 'daily'
       ? { from, to }
-      : { from, to, ...(active.key === 'sales' ? { payment_type: pay, q } : {}) }
+      : { from, to, ...(active.key === 'sales' ? { payment_method: pay, q } : {}) }
   const path = active.path + query(params)
   const report = useApi(path, { deps: [tab, from, to, pay, q] })
 
@@ -840,9 +808,10 @@ export function Reports() {
           <>
             <label>Payment
               <select value={pay} onChange={e => setPay(e.target.value)}>
-                <option value="">All payments</option>
+                <option value="">All methods</option>
                 <option value="cash">Cash</option>
-                <option value="credit">Credit</option>
+                <option value="gcash">GCash</option>
+                <option value="maya">Maya</option>
               </select>
             </label>
             <TextFilter value={q} onChange={setQ} placeholder="Sale no. or customer" />
@@ -857,18 +826,14 @@ export function Reports() {
         <>
           <ReportTotals totals={report.data.totals} />
           <Table
-            head={['Date', { t: 'Cash sales', r: true }, { t: 'Credit sales', r: true }, { t: 'Total sales', r: true },
-              { t: 'Credit payments', r: true }, { t: 'Cash collected', r: true }, { t: 'Deposits', r: true },
-              { t: 'Voided', r: true }, { t: 'Full in', r: true }, { t: 'Empties out', r: true }]}
+            head={['Date', { t: 'Cash sales', r: true }, { t: 'Total sales', r: true },
+              { t: 'Deposits', r: true }, { t: 'Voided', r: true }, { t: 'Full in', r: true }, { t: 'Empties out', r: true }]}
             empty="No activity in this date range."
             rows={report.data.rows.map(r => (
               <tr key={r.report_date}>
                 <td>{r.report_date}</td>
                 <td className="r">{peso(r.cash_sales)}</td>
-                <td className="r">{peso(r.credit_sales)}</td>
                 <td className="r"><b>{peso(r.total_sales)}</b></td>
-                <td className="r">{peso(r.payments)}</td>
-                <td className="r">{peso(r.cash_collected)}</td>
                 <td className="r">{peso(r.deposits)}</td>
                 <td className="r">{r.voided_sales}</td>
                 <td className="r">{r.full_received}</td>
@@ -892,37 +857,12 @@ export function Reports() {
                 <td>{r.sale_date}</td>
                 {isOwner && activeBranch === 'all' ? <td>{r.branch_name}</td> : null}
                 <td>{r.customer || 'Walk-in'}</td>
-                <td><Badge t={r.payment_type} /></td>
+                <td><PaymentCell row={r} /></td>
                 <td className="r">{r.qty}</td>
                 <td className="r">{peso(r.subtotal)}</td>
                 <td className="r">{peso(r.deposit_total)}</td>
                 <td className="r"><b>{peso(r.total_amount)}</b></td>
                 <td>{r.is_void ? <Badge t="void" /> : <Badge t="active" label="Posted" />}</td>
-              </tr>
-            ))}
-          />
-        </>
-      )}
-
-      {report.data && active.key === 'unpaid' && (
-        <>
-          <div className="stats">
-            <Stat label="Total unpaid" value={peso(report.data.total_balance)} tone="warn" />
-          </div>
-          <Table
-            head={['Customer', 'Contact', 'Area', { t: 'Charged', r: true }, { t: 'Paid', r: true },
-              { t: 'Balance', r: true }, { t: 'Credit limit', r: true }, 'Over limit']}
-            empty="No outstanding balances in this branch view."
-            rows={report.data.rows.map(r => (
-              <tr key={r.id}>
-                <td><b>{r.name}</b></td>
-                <td>{r.contact || '—'}</td>
-                <td>{r.address || '—'}</td>
-                <td className="r">{peso(r.charged)}</td>
-                <td className="r">{peso(r.paid)}</td>
-                <td className="r neg">{peso(r.balance)}</td>
-                <td className="r">{r.credit_limit === null ? 'No limit' : peso(r.credit_limit)}</td>
-                <td>{r.over_limit ? <Badge t="cancelled" label="Over limit" /> : '—'}</td>
               </tr>
             ))}
           />
@@ -970,8 +910,8 @@ export function Reports() {
         <>
           <ReportTotals totals={report.data.totals} />
           <Table
-            head={['Branch', 'Code', { t: 'Sales', r: true }, { t: 'Cash sales', r: true }, { t: 'Credit sales', r: true },
-              { t: 'Payments', r: true }, { t: 'Unpaid', r: true }, { t: 'Full', r: true }, { t: 'Empty', r: true }, { t: 'Open orders', r: true }]}
+            head={['Branch', 'Code', { t: 'Sales', r: true }, { t: 'Cash sales', r: true },
+              { t: 'Full', r: true }, { t: 'Empty', r: true }, { t: 'Open orders', r: true }]}
             empty="No active branches."
             rows={report.data.rows.map(r => (
               <tr key={r.id}>
@@ -979,9 +919,6 @@ export function Reports() {
                 <td className="mono">{r.code}</td>
                 <td className="r">{peso(r.sales_total)}</td>
                 <td className="r">{peso(r.cash_sales)}</td>
-                <td className="r">{peso(r.credit_sales)}</td>
-                <td className="r">{peso(r.payments)}</td>
-                <td className="r neg">{peso(r.unpaid)}</td>
                 <td className="r">{num(r.full_qty)}</td>
                 <td className="r">{num(r.empty_qty)}</td>
                 <td className="r">{num(r.open_orders)}</td>
@@ -1015,7 +952,7 @@ export function Branches() {
       </p>
 
       <Table
-        head={['Branch', 'Code', 'Admin', 'Contact', 'Hours', 'Cut-off',
+        head={['Branch', 'Code', 'Admin', 'Contact', 'Prepaid accounts', 'Service areas', 'Hours', 'Cut-off',
           { t: 'Fees', r: true }, { t: 'Max / order', r: true },
           { t: 'Active team', r: true }, { t: 'Open orders', r: true }, { t: 'Open transfers', r: true },
           { t: 'Full stock', r: true }, { t: 'Sold today', r: true }, 'Status', 'Actions']}
@@ -1029,6 +966,11 @@ export function Branches() {
             <td className="mono">{b.code}</td>
             <td>{b.branch_admin?.name || <span className="muted">Not assigned</span>}</td>
             <td>{b.contact_phone || '—'}</td>
+            <td>
+              <small className="sub">GCash {accountText(b.gcash_number, b.gcash_account_name)}</small>
+              <small className="sub">Maya {accountText(b.maya_number, b.maya_account_name)}</small>
+            </td>
+            <td className="wrap">{citiesText(b.service_area_cities)}</td>
             <td>{b.operating_hours || '—'}</td>
             <td>{b.cutoff_time || '—'}</td>
             <td className="r">
@@ -1262,7 +1204,7 @@ const AUDIT_ACTIONS = [
   'login', 'logout', 'register', 'create', 'update', 'deactivate', 'activate', 'approve',
   'cancel', 'deliver', 'assign', 'ship', 'receive', 'void', 'password_reset', 'password_change',
 ]
-const AUDIT_ENTITIES = ['user', 'customer', 'sale', 'order', 'delivery', 'payment', 'adjustment', 'size', 'branch', 'branch_prices', 'transfer']
+const AUDIT_ENTITIES = ['user', 'customer', 'sale', 'order', 'delivery', 'adjustment', 'size', 'branch', 'branch_prices', 'transfer']
 
 export function Audit() {
   const { tr } = useApp()
@@ -1334,41 +1276,21 @@ export function Shop() {
   const [modal, setModal] = useState(null)
   const orders = useApi('my/orders?per_page=100')
   const account = useApi('my/account')
-  const payments = useApi('my/payments?per_page=50')
   const acct = account.data
 
   const openOrders = (orders.data || []).filter(o => ['pending', 'approved'].includes(o.status)).length
 
   return (
     <>
-      <PageHeader title={tr('nav.shop')} sub="Place orders, track deliveries, and see what you owe">
+      <PageHeader title={tr('nav.shop')} sub="Place orders, track deliveries, and check empties to return">
         <button className="primary" onClick={() => setModal({ type: 'order' })}>Place an order</button>
       </PageHeader>
 
       {acct && (
         <div className="stats">
-          <Stat label="Amount you owe" value={peso(Math.max(0, Number(acct.balance) || 0))} tone={Number(acct.balance) > 0 ? 'warn' : 'ok'} />
           <Stat label="Empties to return" value={num(acct.empties_owed)} />
           <Stat label="Open orders" value={num(openOrders)} hint="Pending or approved" />
-          <Stat label="Credit limit" value={acct.credit_limit === null ? 'No limit' : peso(acct.credit_limit)} />
         </div>
-      )}
-
-      {acct?.by_branch?.length > 1 && (
-        <>
-          <h2 className="sec">Balance by branch</h2>
-          <Table
-            head={['Branch', { t: 'Balance', r: true }, { t: 'Empties owed', r: true }]}
-            empty="No branch balances."
-            rows={acct.by_branch.map(b => (
-              <tr key={b.branch_id}>
-                <td>{b.branch_name}</td>
-                <td className="r">{peso(b.balance)}</td>
-                <td className="r">{num(b.empties_owed)}</td>
-              </tr>
-            ))}
-          />
-        </>
       )}
 
       <h2 className="sec">My orders</h2>
@@ -1392,7 +1314,7 @@ export function Shop() {
             <td className="r">{peso(o.total_amount)}</td>
             <td>{dateFmt(o.requested_date)}{o.time_slot ? <small className="sub">{o.time_slot}</small> : null}</td>
             <td>{o.rider_name || '—'}</td>
-            <td><Badge t={o.payment_type} /></td>
+            <td><PaymentCell row={o} /></td>
             <td><Badge t={o.status} /></td>
             <Acts>
               {o.status === 'pending' && (
@@ -1402,25 +1324,6 @@ export function Shop() {
                 </>
               )}
             </Acts>
-          </tr>
-        ))}
-      />
-
-      <h2 className="sec">My payments</h2>
-      <Table
-        head={['Date', 'Payment no.', 'Branch', 'Method', { t: 'Amount', r: true }, 'Status']}
-        loading={payments.loading}
-        error={payments.error}
-        onRetry={payments.reload}
-        empty="No payments recorded yet."
-        rows={(payments.data || []).map(p => (
-          <tr key={p.id}>
-            <td>{dateFmt(p.payment_date)}</td>
-            <td className="mono">{p.payment_no || '—'}</td>
-            <td>{p.branch_name}</td>
-            <td><Badge t={p.method} label={p.method} /></td>
-            <td className="r">{peso(p.amount)}</td>
-            <td>{Number(p.is_void) === 1 ? <Badge t="void" /> : <Badge t="active" label="Posted" />}</td>
           </tr>
         ))}
       />

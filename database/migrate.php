@@ -28,6 +28,12 @@ require dirname(__DIR__) . '/api/src/db.php';
  * with MYSQL_ATTR_MULTI_STATEMENTS, so migrations are executed one statement at
  * a time. This splitter understands quotes, backticks, `--` / `#` comments and
  * block comments. Migration files must not use DELIMITER or stored programs.
+ *
+ * A migration may declare one preflight query with a comment directive:
+ *   -- preflight-sql: SELECT COUNT(*) ...
+ *   -- preflight-message: Human-readable refusal text
+ * If the query returns a non-zero first column, the migration is refused before
+ * any statement is executed. This is how 005 blocks unpaid legacy credit.
  */
 function split_sql_statements(string $sql): array
 {
@@ -152,6 +158,29 @@ function split_sql_statements(string $sql): array
     return $out;
 }
 
+/** Run a migration's optional preflight guard. Exits with a clear message. */
+function enforce_migration_preflight(PDO $pdo, string $sql, string $name): void
+{
+    if (!preg_match('/^--\s*preflight-sql:\s*(.+)$/mi', $sql, $match)) {
+        return;
+    }
+    $query = trim($match[1]);
+    $message = 'Migration ' . $name . ' refused by its preflight check.';
+    if (preg_match('/^--\s*preflight-message:\s*(.+)$/mi', $sql, $msg)) {
+        $message = trim($msg[1]);
+    }
+    try {
+        $count = (int) $pdo->query($query)->fetchColumn();
+    } catch (Throwable $e) {
+        fwrite(STDERR, "Preflight check for {$name} failed: " . $e->getMessage() . "\n");
+        exit(1);
+    }
+    if ($count > 0) {
+        fwrite(STDERR, "{$message}\n");
+        exit(1);
+    }
+}
+
 $dryRun = in_array('--dry-run', $argv, true);
 $noBackup = in_array('--no-backup', $argv, true);
 $db = config('db');
@@ -205,6 +234,15 @@ if (!$pending) {
 echo "Pending migrations:\n";
 foreach ($pending as $m) {
     echo "  - {$m['name']}\n";
+}
+
+foreach ($pending as $m) {
+    $sql = file_get_contents($m['file']);
+    if ($sql === false) {
+        fwrite(STDERR, "cannot read {$m['name']}\n");
+        exit(1);
+    }
+    enforce_migration_preflight($pdo, $sql, $m['name']);
 }
 
 if ($dryRun) {

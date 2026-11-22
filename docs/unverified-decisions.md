@@ -3,7 +3,9 @@
 This file is the launch gate. An item marked **open** has not been confirmed by
 the business owner and must not be treated as true in production.
 
-Status values: **open**, **confirmed**, **not applicable**.
+Status values: **open**, **confirmed**, **not applicable**, **resolved**,
+**removed**. `removed` means the feature and its data fields were deleted in
+Phase 1; `resolved` means a decision was made and implemented.
 
 ## 1. Launch blockers
 
@@ -32,22 +34,25 @@ Status values: **open**, **confirmed**, **not applicable**.
 | 16 | Staff branch assignment | Exactly one branch per staff account | Confirm no staff member needs to work across branches; owner can see all. |
 | 17 | Owner write branch | Owner must choose one active branch for writes; reads can be `all` | Confirm the workflow is acceptable. |
 | 18 | Prices | Per-branch override with global fallback | Confirm who may change prices, how often, and whether changes need approval. Currently owner-only. |
-| 19 | Credit limit | Optional per-customer limit, enforced per branch on credit sales/orders | Confirm limit values, whether limits are per branch or company-wide, and the approval process. |
-| 20 | Credit terms | No due dates or statements; balance is tracked | Decide terms, collection process, statements and any lawful charges. |
-| 21 | Payment methods | `cash`, `gcash`, `maya`, `bank`, `other` with optional reference | Confirm supported methods and whether proof/reference is mandatory. No online payment gateway is integrated. |
+| 19 | Credit limit | **removed** (Phase 1) | No credit, limits or per-branch totals remain. `customers.credit_limit` is gone; no decision needed. |
+| 20 | Credit terms / open balances | **removed** (Phase 1) | No due dates, statements, collections or open balances. Migration 005 refuses to run until legacy non-void credit balances are settled. |
+| 21 | Payment methods and verification | **resolved** (Phase 1): only `cash` (cash on delivery), `gcash`, `maya`; GCash/Maya require a 4–80 character reference and staff verification before approval/delivery. No payment gateway is integrated. | Confirm who is allowed to verify (staff, owner, or both), the final reference-number format, and who keeps branch GCash/Maya account details current — see items 70–72. |
 | 22 | Delivery fees | No delivery-fee field | Decide free vs charged delivery, and how a fee would be represented. |
 | 23 | Time slots | Free-text slot per order | Define standard slots per branch and whether they are enforced. |
 | 24 | Cutoff time | Optional per-branch same-day cutoff | Set real cutoff times and the customer-facing wording. |
 | 25 | Max order quantity | Per-branch cylinder count | Set real limits and whether they differ by size or customer type. |
 | 26 | Empties and deposits | `deposit_amount` per line and empties-owed calculation | Confirm deposit amounts, refund rules, lost/damaged cylinder charges and ownership. |
-| 27 | Resellers | `is_reseller` / `reseller_status` flags and customer form | Confirm whether there is a real reseller program, approval workflow and pricing. The current feature is only a flag/status. |
+| 27 | Resellers | **removed** (Phase 1) | `is_reseller` / `reseller_status` and all reseller form fields were deleted. Only contact/address profile data remains. |
 | 28 | Customer cancellation | Pending orders only | Confirm whether approved orders can be cancelled by staff/owner and under what rules. |
-| 29 | Void policy | Owner can void sales/payments/deliveries/adjustments with a reason | Confirm who may void, whether staff can void, and the review/approval process. Currently owner-only for many actions. |
+| 29 | Void policy | Owner can void sales, deliveries and adjustments with a reason | Confirm who may void, whether staff can void, and the review/approval process. Currently owner-only for many actions. |
 | 30 | Rider assignment | Optional `rider_id` pointing at an active staff/owner | Confirm rider list, assignment rules and whether riders need their own role. |
 | 31 | Proof of delivery | Text reference (`proof_of_delivery`) | Confirm whether photos/signatures are required; uploads are not implemented. |
-| 32 | Notifications | Not implemented | Decide in-app, email, SMS or none for order status, approvals, deliveries and payments. |
+| 32 | Notifications | Not implemented | Decide in-app, email, SMS or none for order status, payment verification/rejection, approvals and deliveries. |
 | 33 | Customer password reset | Owner-assisted reset only | Decide whether customers need self-service reset and what identity proof is required. |
-| 34 | Account deletion | Customers can be deactivated by staff; no self-service deletion | Define the data-subject deletion/anonymisation process and its effect on financial records. |
+| 34 | Account deletion | Customers can be deactivated by staff; no self-service deletion | Define the data-subject deletion/anonymisation process and its effect on sales, order references and audit records. |
+| 70 | Payment verifier role | Branch-scoped staff or owner can verify/reject via `POST /api/orders/{id}/verify-payment` and `.../reject-payment` | Confirm exactly who may verify in each branch and whether a second person must approve a verification. |
+| 71 | Reference-number format | 4–80 characters, starting with a letter/digit, then letters, digits, `.`, `_`, `:` or `-`; unique across orders and sales | Confirm this matches the receipts issued by the real GCash/Maya accounts and whether extra whitespace/lowercase variants should be accepted. |
+| 72 | Branch account details | `gcash_number`, `gcash_account_name`, `maya_number`, `maya_account_name` and `service_area_cities` are owner-maintained per branch | Supply real values, decide where customers are told to pay, and assign responsibility for keeping them current. |
 
 ## 3. Legal and compliance
 
@@ -57,10 +62,10 @@ Status values: **open**, **confirmed**, **not applicable**.
 | 36 | Terms review | open | Same. |
 | 37 | DPO appointment and NPC registration | open | Determine whether registration is required for the organisation. |
 | 38 | Lawful basis and processing inventory | open | Document per purpose: contract, legitimate interest, consent, legal obligation. |
-| 39 | Retention schedule | open | Define periods for accounts, orders, payments, audit, login attempts and backups. The app keeps data indefinitely unless deactivated/deleted. |
+| 39 | Retention schedule | open | Define periods for accounts, orders, order/sale payment references, verification audit, login attempts and backups. The app keeps data indefinitely unless deactivated/deleted. |
 | 40 | Data-subject request procedure | open | Define intake, identity verification, fulfilment and response deadlines. |
 | 41 | Breach response plan | open | Define decision-maker, NPC notification, customer notification, evidence preservation. |
-| 42 | Processor agreements | open | Hosting, SMS, payment, support and backup providers. |
+| 42 | Processor agreements | open | Hosting, SMS, support and backup providers. There is no payment gateway/processor in this phase; GCash/Maya are consumer payment apps used outside the system. |
 | 43 | Cross-border transfer assessment | open | Depends on hosting region and providers. |
 | 44 | Cookies/analytics | none currently | If analytics or ads are added, update the policy and add consent where required. |
 | 45 | Consumer protection terms | open | Pricing, refunds, cancellations and complaints must comply with Philippine consumer law. |
@@ -92,7 +97,7 @@ Status values: **open**, **confirmed**, **not applicable**.
 | 66 | Legacy folders | `FRONTEND/`, `BACKEND/`, `legacy/node-backend/` retained | They were locked by a process during the port. Remove them from the deployment artifact once verified; never serve them. |
 | 67 | Test data | `lpg_test` is disposable | Never point tests at production; the runner drops the configured test database. |
 | 68 | Database name | `lpg_db` | Some hosts require a prefixed name; update schema/config together. |
-| 69 | Shared customer records | Home branch plus transaction-based staff access; contact and credit fields are global | Confirm whether a customer may be shared across branches, and who may edit or deactivate a shared record. |
+| 69 | Shared customer records | Home branch plus sale/order-based staff access; contact and address fields are global | Confirm whether a customer may be shared across branches, and who may edit or deactivate a shared record. |
 
 ## 5. Decisions already made in this port
 
@@ -104,9 +109,9 @@ reversed:
 - Branch-specific prices with a global fallback.
 - Customers may order from any active branch.
 - Customers have an optional home branch. Staff may manage a customer only when
-  it is their home-branch customer or has a sale, order or payment in their
-  branch. Public signups start with no home branch. Customer contact/credit
-  fields are global, so an allowed update is visible to every branch.
+  it is their home-branch customer or has a sale or order in their branch.
+  Public signups start with no home branch. Customer contact and address fields
+  are global, so an allowed update is visible to every branch.
 - Staff belong to exactly one branch; branch comes from the DB, never from the
   client.
 - Owner reads may span all branches; owner writes require one concrete active
@@ -116,7 +121,15 @@ reversed:
 - Financial and stock records are voided/reversed, not hard-deleted.
 - Order prices are locked at order creation.
 - Transfers use a state machine and an idempotency key.
-- Open balances and credit limits are tracked per branch.
+- Prepaid only: cash (cash on delivery), GCash and Maya. Credit, balances,
+  credit limits, the record-payment flow and the unpaid report were removed in
+  Phase 1. The legacy payments table is read-only history.
+- GCash/Maya require a customer-submitted reference and staff verification
+  before an order can be approved or delivered. Duplicate references are
+  rejected across both orders and sales; a rejected reference can be resubmitted
+  on the pending order.
+- Prices, cylinder deposits and delivery fees are computed server-only from
+  branch/size data; they are never accepted as authoritative client input.
 - Sessions are file-based, strict, re-checked against the DB on every request.
 - CSRF applies to login/signup too.
 - Login is rate-limited per username+IP, per account and per IP.
@@ -129,8 +142,11 @@ reversed:
 - Migration `001_add_branches` assigns all legacy rows to
   `Main Branch (MAIN)`.
 - Migration `002_customer_home_branch` backfills a home branch from each
-  customer's earliest sale, order or payment; customers with no activity stay
+  customer's earliest sale or order; customers with no activity stay
   unassigned until the owner sets one.
+- Migration `005_prepaid_payments` removes credit/reseller fields, adds the
+  payment-method and verification fields, and refuses to run while any non-void
+  legacy credit sale still has an outstanding amount (item 20).
 - The marketing brand defaults to a generic placeholder, with no assumed
   third-party authorisation.
 - Legal pages are templates with a visible review warning.
@@ -141,7 +157,7 @@ reversed:
 |------|------|------|--------|
 | Brand and logo authorisation | | | |
 | Branch and price data | | | |
-| Credit and deposit policy | | | |
+| Prepaid payment and deposit / verification policy | | | |
 | Hosting, domain, HTTPS | | | |
 | Backups and monitoring | | | |
 | Privacy Policy and Terms | | | |

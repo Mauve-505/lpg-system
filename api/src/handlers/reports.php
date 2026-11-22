@@ -70,10 +70,10 @@ function api_report_daily(): void
 
     $rows = rows(
         "SELECT d.d AS report_date,
-            COALESCE((SELECT SUM(total_amount) FROM sales s WHERE s.sale_date=d.d AND s.is_void=0 AND s.payment_type='cash'{$sc}),0) cash_sales,
-            COALESCE((SELECT SUM(total_amount) FROM sales s WHERE s.sale_date=d.d AND s.is_void=0 AND s.payment_type='credit'{$sc}),0) credit_sales,
+            COALESCE((SELECT SUM(total_amount) FROM sales s WHERE s.sale_date=d.d AND s.is_void=0 AND s.payment_method='cash'{$sc}),0) cash,
+            COALESCE((SELECT SUM(total_amount) FROM sales s WHERE s.sale_date=d.d AND s.is_void=0 AND s.payment_method='gcash'{$sc}),0) gcash,
+            COALESCE((SELECT SUM(total_amount) FROM sales s WHERE s.sale_date=d.d AND s.is_void=0 AND s.payment_method='maya'{$sc}),0) maya,
             COALESCE((SELECT SUM(total_amount) FROM sales s WHERE s.sale_date=d.d AND s.is_void=0{$sc}),0) total_sales,
-            COALESCE((SELECT SUM(amount) FROM payments p WHERE p.payment_date=d.d AND p.is_void=0{$sc}),0) payments,
             COALESCE((SELECT SUM(deposit_total) FROM sales s WHERE s.sale_date=d.d AND s.is_void=0{$sc}),0) deposits,
             COALESCE((SELECT COUNT(*) FROM sales s WHERE s.sale_date=d.d AND s.is_void=1{$sc}),0) voided_sales,
             COALESCE((SELECT SUM(i.full_received) FROM plant_deliveries pd JOIN plant_delivery_items i ON i.delivery_id=pd.id
@@ -83,26 +83,22 @@ function api_report_daily(): void
          FROM (
              SELECT sale_date d FROM sales WHERE sale_date BETWEEN ? AND ?" . ($scope['mode'] === 'branch' ? ' AND branch_id=?' : '') . "
              UNION
-             SELECT payment_date FROM payments WHERE payment_date BETWEEN ? AND ?" . ($scope['mode'] === 'branch' ? ' AND branch_id=?' : '') . "
-             UNION
              SELECT delivery_date FROM plant_deliveries WHERE delivery_date BETWEEN ? AND ?" . ($scope['mode'] === 'branch' ? ' AND branch_id=?' : '') . "
          ) d
          ORDER BY d.d DESC",
         array_merge(
-            // Outer SELECT subqueries: cash, credit, total, payments,
-            // deposits, voided sales, full received, empties returned.
+            // Outer subqueries: cash, gcash, maya, total, deposits, voided,
+            // full received, empties returned.
             $sp, $sp, $sp, $sp, $sp, $sp, $sp, $sp,
             // Date union blocks (each is BETWEEN ? AND ? plus optional branch).
-            [$from, $to], $sp,
             [$from, $to], $sp,
             [$from, $to], $sp
         )
     );
     foreach ($rows as &$r) {
-        foreach (['cash_sales', 'credit_sales', 'total_sales', 'payments', 'deposits'] as $k) {
+        foreach (['cash', 'gcash', 'maya', 'total_sales', 'deposits'] as $k) {
             $r[$k] = money($r[$k]);
         }
-        $r['cash_collected'] = money($r['cash_sales'] + $r['payments']);
         $r['voided_sales'] = (int) $r['voided_sales'];
         $r['full_received'] = (int) $r['full_received'];
         $r['empties_returned'] = (int) $r['empties_returned'];
@@ -110,11 +106,10 @@ function api_report_daily(): void
     unset($r);
 
     $totals = [
-        'cash_sales' => money(array_sum(array_column($rows, 'cash_sales'))),
-        'credit_sales' => money(array_sum(array_column($rows, 'credit_sales'))),
+        'cash' => money(array_sum(array_column($rows, 'cash'))),
+        'gcash' => money(array_sum(array_column($rows, 'gcash'))),
+        'maya' => money(array_sum(array_column($rows, 'maya'))),
         'total_sales' => money(array_sum(array_column($rows, 'total_sales'))),
-        'payments' => money(array_sum(array_column($rows, 'payments'))),
-        'cash_collected' => money(array_sum(array_column($rows, 'cash_collected'))),
         'deposits' => money(array_sum(array_column($rows, 'deposits'))),
         'voided_sales' => array_sum(array_column($rows, 'voided_sales')),
         'full_received' => array_sum(array_column($rows, 'full_received')),
@@ -125,15 +120,14 @@ function api_report_daily(): void
         $out = [];
         foreach ($rows as $r) {
             $out[] = [
-                $r['report_date'], $r['cash_sales'], $r['credit_sales'], $r['total_sales'],
-                $r['payments'], $r['cash_collected'], $r['deposits'], $r['voided_sales'],
-                $r['full_received'], $r['empties_returned'],
+                $r['report_date'], $r['cash'], $r['gcash'], $r['maya'], $r['total_sales'],
+                $r['deposits'], $r['voided_sales'], $r['full_received'], $r['empties_returned'],
             ];
         }
         csv_download(
             'daily-report-' . $from . '-to-' . $to . '.csv',
-            ['Date', 'Cash sales', 'Credit sales', 'Total sales', 'Credit payments', 'Cash collected',
-                'Deposits', 'Voided sales', 'Full received', 'Empties returned'],
+            ['Date', 'Cash', 'GCash', 'Maya', 'Total sales', 'Deposits', 'Voided sales',
+                'Full received', 'Empties returned'],
             $out
         );
     }
@@ -160,12 +154,12 @@ function api_report_sales(): void
 
     $where = 's.sale_date BETWEEN ? AND ?' . $sc;
     $params = array_merge([$from, $to], $sp);
-    if (($pt = query_str('payment_type', 10)) !== '') {
-        if (!in_array($pt, ['cash', 'credit'], true)) {
+    if (($pm = query_str('payment_method', 13)) !== '') {
+        if (!in_array($pm, ['cash', 'gcash', 'maya'], true)) {
             fail('Invalid payment filter.', 422, 'validation_error');
         }
-        $where .= ' AND s.payment_type=?';
-        $params[] = $pt;
+        $where .= ' AND s.payment_method=?';
+        $params[] = $pm;
     }
     if (($cid = query_int('customer_id', null, 1)) !== null) {
         $where .= ' AND s.customer_id=?';
@@ -179,7 +173,8 @@ function api_report_sales(): void
     }
 
     $rows = rows(
-        'SELECT s.id, s.sale_no, s.sale_date, s.payment_type, s.subtotal, s.deposit_total, s.total_amount,
+        'SELECT s.id, s.sale_no, s.sale_date, s.payment_method, s.payment_reference,
+                s.subtotal, s.deposit_total, s.total_amount,
                 s.is_void, s.void_reason, b.name branch_name, c.name customer,
                 (SELECT COALESCE(SUM(qty),0) FROM sale_items i WHERE i.sale_id=s.id) qty,
                 (SELECT COUNT(*) FROM sale_items i WHERE i.sale_id=s.id) line_count
@@ -207,14 +202,14 @@ function api_report_sales(): void
         foreach ($rows as $r) {
             $out[] = [
                 $r['sale_no'], $r['sale_date'], $r['branch_name'], $r['customer'] ?? 'Walk-in',
-                $r['payment_type'], $r['qty'], $r['subtotal'], $r['deposit_total'],
+                $r['payment_method'], $r['payment_reference'] ?? '', $r['qty'], $r['subtotal'], $r['deposit_total'],
                 $r['total_amount'], $r['is_void'] ? 'void' : 'posted', $r['void_reason'] ?? '',
             ];
         }
         csv_download(
             'sales-register-' . $from . '-to-' . $to . '.csv',
-            ['Sale no.', 'Date', 'Branch', 'Customer', 'Payment', 'Qty', 'Subtotal', 'Deposit',
-                'Total', 'Status', 'Void reason'],
+            ['Sale no.', 'Date', 'Branch', 'Customer', 'Payment method', 'Reference', 'Qty', 'Subtotal',
+                'Deposit', 'Total', 'Status', 'Void reason'],
             $out
         );
     }
@@ -229,61 +224,6 @@ function api_report_sales(): void
             'voided' => money(array_sum(array_map(static fn($r) => $r['is_void'] ? $r['total_amount'] : 0, $rows))),
             'transactions' => count($rows),
         ],
-    ]);
-}
-
-/* ------------------------------------------------------------------------- */
-/* Outstanding balances and empties                                          */
-/* ------------------------------------------------------------------------- */
-
-function api_report_unpaid(): void
-{
-    $u = require_staff_or_owner();
-    $scope = branch_scope($u);
-    [$scCharged, $pCharged] = report_branch_condition($scope, 's.branch_id');
-    [$scPaid, $pPaid] = report_branch_condition($scope, 'p.branch_id');
-
-    $rows = rows(
-        "SELECT c.id, c.name, c.contact, c.address, c.credit_limit,
-            COALESCE((SELECT SUM(i.line_total) FROM sales s JOIN sale_items i ON i.sale_id=s.id
-                      WHERE s.customer_id=c.id AND s.is_void=0 AND s.payment_type='credit'{$scCharged}),0)
-            + COALESCE((SELECT SUM(s.rush_fee + s.outside_zone_fee) FROM sales s
-                      WHERE s.customer_id=c.id AND s.is_void=0 AND s.payment_type='credit'{$scCharged}),0) charged,
-            COALESCE((SELECT SUM(p.amount) FROM payments p
-                      WHERE p.customer_id=c.id AND p.is_void=0{$scPaid}),0) paid
-         FROM customers c
-         WHERE c.is_active=1
-         HAVING charged - paid > 0.005
-         ORDER BY (charged - paid) DESC, c.name
-         LIMIT 5000",
-        array_merge($pCharged, $pCharged, $pPaid)
-    );
-    foreach ($rows as &$r) {
-        $r['id'] = (int) $r['id'];
-        $r['charged'] = money($r['charged']);
-        $r['paid'] = money($r['paid']);
-        $r['balance'] = money($r['charged'] - $r['paid']);
-        $r['credit_limit'] = $r['credit_limit'] === null ? null : money($r['credit_limit']);
-        $r['over_limit'] = $r['credit_limit'] !== null && $r['balance'] > $r['credit_limit'];
-    }
-    unset($r);
-
-    if (report_wants_csv()) {
-        $out = [];
-        foreach ($rows as $r) {
-            $out[] = [$r['name'], $r['contact'], $r['address'], $r['charged'], $r['paid'], $r['balance'],
-                $r['credit_limit'] ?? '', $r['over_limit'] ? 'yes' : 'no'];
-        }
-        csv_download('unpaid-balances-' . today() . '.csv',
-            ['Customer', 'Contact', 'Address', 'Charged', 'Paid', 'Balance', 'Credit limit', 'Over limit'],
-            $out);
-    }
-
-    json_response([
-        'branch' => ['mode' => $scope['mode'], 'id' => $scope['id'], 'name' => $scope['name']],
-        'as_of' => now_iso(),
-        'rows' => $rows,
-        'total_balance' => money(array_sum(array_column($rows, 'balance'))),
     ]);
 }
 
@@ -390,17 +330,13 @@ function api_report_branch_comparison(): void
             COALESCE((SELECT SUM(s.total_amount) FROM sales s
                       WHERE s.branch_id=b.id AND s.sale_date BETWEEN ? AND ? AND s.is_void=0),0) sales_total,
             COALESCE((SELECT SUM(s.total_amount) FROM sales s
-                      WHERE s.branch_id=b.id AND s.sale_date BETWEEN ? AND ? AND s.is_void=0 AND s.payment_type='cash'),0) cash_sales,
+                      WHERE s.branch_id=b.id AND s.sale_date BETWEEN ? AND ? AND s.is_void=0 AND s.payment_method='cash'),0) cash,
             COALESCE((SELECT SUM(s.total_amount) FROM sales s
-                      WHERE s.branch_id=b.id AND s.sale_date BETWEEN ? AND ? AND s.is_void=0 AND s.payment_type='credit'),0) credit_sales,
-            COALESCE((SELECT SUM(p.amount) FROM payments p
-                      WHERE p.branch_id=b.id AND p.payment_date BETWEEN ? AND ? AND p.is_void=0),0) payments,
-            COALESCE((SELECT SUM(i.line_total) FROM sales s JOIN sale_items i ON i.sale_id=s.id
-                      WHERE s.branch_id=b.id AND s.is_void=0 AND s.payment_type='credit'),0)
-            + COALESCE((SELECT SUM(s.rush_fee + s.outside_zone_fee) FROM sales s
-                      WHERE s.branch_id=b.id AND s.is_void=0 AND s.payment_type='credit'),0)
-            - COALESCE((SELECT SUM(p.amount) FROM payments p
-                      WHERE p.branch_id=b.id AND p.is_void=0),0) unpaid,
+                      WHERE s.branch_id=b.id AND s.sale_date BETWEEN ? AND ? AND s.is_void=0 AND s.payment_method='gcash'),0) gcash,
+            COALESCE((SELECT SUM(s.total_amount) FROM sales s
+                      WHERE s.branch_id=b.id AND s.sale_date BETWEEN ? AND ? AND s.is_void=0 AND s.payment_method='maya'),0) maya,
+            COALESCE((SELECT SUM(s.deposit_total) FROM sales s
+                      WHERE s.branch_id=b.id AND s.sale_date BETWEEN ? AND ? AND s.is_void=0),0) deposits,
             COALESCE((SELECT SUM(m.full_change) FROM stock_movements m WHERE m.branch_id=b.id),0) full_qty,
             COALESCE((SELECT SUM(m.empty_change) FROM stock_movements m WHERE m.branch_id=b.id),0) empty_qty,
             COALESCE((SELECT SUM(m.out_change) FROM stock_movements m WHERE m.branch_id=b.id),0) out_qty,
@@ -408,16 +344,14 @@ function api_report_branch_comparison(): void
          FROM branches b
          WHERE b.is_active=1
          ORDER BY b.name",
-        [$from, $to, $from, $to, $from, $to, $from, $to]
+        [$from, $to, $from, $to, $from, $to, $from, $to, $from, $to]
     );
     foreach ($rows as &$r) {
         $r['id'] = (int) $r['id'];
         $r['is_active'] = (int) $r['is_active'];
-        foreach (['sales_total', 'cash_sales', 'credit_sales', 'payments'] as $k) {
+        foreach (['sales_total', 'cash', 'gcash', 'maya', 'deposits'] as $k) {
             $r[$k] = money($r[$k]);
         }
-        $r['unpaid'] = money(max(0, $r['unpaid']));
-        $r['cash_collected'] = money($r['cash_sales'] + $r['payments']);
         $r['full_qty'] = (int) $r['full_qty'];
         $r['empty_qty'] = (int) $r['empty_qty'];
         $r['out_qty'] = (int) $r['out_qty'];
@@ -429,14 +363,13 @@ function api_report_branch_comparison(): void
         $out = [];
         foreach ($rows as $r) {
             $out[] = [
-                $r['name'], $r['code'], $r['sales_total'], $r['cash_sales'], $r['credit_sales'],
-                $r['payments'], $r['cash_collected'], $r['unpaid'], $r['full_qty'], $r['empty_qty'],
-                $r['out_qty'], $r['open_orders'],
+                $r['name'], $r['code'], $r['sales_total'], $r['cash'], $r['gcash'], $r['maya'],
+                $r['deposits'], $r['full_qty'], $r['empty_qty'], $r['out_qty'], $r['open_orders'],
             ];
         }
         csv_download('branch-comparison-' . $from . '-to-' . $to . '.csv',
-            ['Branch', 'Code', 'Sales', 'Cash sales', 'Credit sales', 'Credit payments', 'Cash collected',
-                'Unpaid', 'Full', 'Empty', 'With customers', 'Open orders'],
+            ['Branch', 'Code', 'Sales', 'Cash', 'GCash', 'Maya', 'Deposits', 'Full', 'Empty',
+                'With customers', 'Open orders'],
             $out);
     }
 
@@ -446,8 +379,10 @@ function api_report_branch_comparison(): void
         'rows' => $rows,
         'totals' => [
             'sales_total' => money(array_sum(array_column($rows, 'sales_total'))),
-            'payments' => money(array_sum(array_column($rows, 'payments'))),
-            'unpaid' => money(array_sum(array_column($rows, 'unpaid'))),
+            'cash' => money(array_sum(array_column($rows, 'cash'))),
+            'gcash' => money(array_sum(array_column($rows, 'gcash'))),
+            'maya' => money(array_sum(array_column($rows, 'maya'))),
+            'deposits' => money(array_sum(array_column($rows, 'deposits'))),
             'full_qty' => array_sum(array_column($rows, 'full_qty')),
             'empty_qty' => array_sum(array_column($rows, 'empty_qty')),
             'out_qty' => array_sum(array_column($rows, 'out_qty')),

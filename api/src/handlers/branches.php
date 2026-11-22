@@ -23,7 +23,12 @@ function branch_payload(array $b): array
         'code' => $b['code'],
         'address' => $b['address'],
         'contact_phone' => $b['contact_phone'],
+        'gcash_number' => $b['gcash_number'] ?? null,
+        'gcash_account_name' => $b['gcash_account_name'] ?? null,
+        'maya_number' => $b['maya_number'] ?? null,
+        'maya_account_name' => $b['maya_account_name'] ?? null,
         'service_area_notes' => $b['service_area_notes'],
+        'service_area_cities' => $b['service_area_cities'] ?? null,
         'operating_hours' => $b['operating_hours'],
         'cutoff_time' => $b['cutoff_time'] === null ? null : substr((string) $b['cutoff_time'], 0, 5),
         'max_order_qty' => (int) $b['max_order_qty'],
@@ -60,13 +65,35 @@ function branch_time(?string $value): ?string
     return $value . ':00';
 }
 
+/** Service-area cities may be sent as an array or a comma-separated string. */
+function branch_cities_input(): ?string
+{
+    $v = body_value('service_area_cities');
+    if ($v === null) {
+        return null;
+    }
+    if (is_array($v)) {
+        $v = implode(',', array_map('strval', $v));
+    }
+    if (!is_string($v) && !is_numeric($v)) {
+        fail('Invalid service area cities value.', 422, 'validation_error', ['field' => 'service_area_cities']);
+    }
+    $v = trim((string) $v);
+    return $v === '' ? null : mb_substr($v, 0, 500);
+}
+
 function branch_input(): array
 {
     return [
         'name' => input_str('name', 'Branch name', 2, 100),
         'address' => address_input('', 'Address', false),
         'contact_phone' => input_str('contact_phone', 'Contact number', 0, 40, false),
+        'gcash_number' => query_body_str('gcash_number', 80),
+        'gcash_account_name' => query_body_str('gcash_account_name', 100),
+        'maya_number' => query_body_str('maya_number', 80),
+        'maya_account_name' => query_body_str('maya_account_name', 100),
         'service_area_notes' => input_str('service_area_notes', 'Service area notes', 0, 500, false),
+        'service_area_cities' => branch_cities_input(),
         'operating_hours' => input_str('operating_hours', 'Operating hours', 0, 200, false),
         'cutoff_time' => branch_time(query_body_str('cutoff_time', 10)),
         'max_order_qty' => input_int('max_order_qty', 'Maximum cylinders per order', 1, 500, false) ?? 20,
@@ -144,14 +171,20 @@ function api_branches_create(): void
         $a = $data['address'];
         q(
             'INSERT INTO branches (name, code, address, street, barangay, city, province, region, postal_code,
-                latitude, longitude, contact_phone, service_area_notes, operating_hours, cutoff_time,
+                latitude, longitude, contact_phone, gcash_number, gcash_account_name, maya_number,
+                maya_account_name, service_area_notes, service_area_cities, operating_hours, cutoff_time,
                 max_order_qty, rush_fee, outside_zone_fee, is_active, created_by)
-             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?)',
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?)',
             [
                 $data['name'], $code, $a['address'], $a['street'], $a['barangay'], $a['city'],
                 $a['province'], $a['region'], $a['postal_code'], $a['latitude'], $a['longitude'],
                 $data['contact_phone'] === '' ? null : $data['contact_phone'],
+                $data['gcash_number'] === '' || $data['gcash_number'] === null ? null : $data['gcash_number'],
+                $data['gcash_account_name'] === '' || $data['gcash_account_name'] === null ? null : $data['gcash_account_name'],
+                $data['maya_number'] === '' || $data['maya_number'] === null ? null : $data['maya_number'],
+                $data['maya_account_name'] === '' || $data['maya_account_name'] === null ? null : $data['maya_account_name'],
                 $data['service_area_notes'] === '' ? null : $data['service_area_notes'],
+                $data['service_area_cities'],
                 $data['operating_hours'] === '' ? null : $data['operating_hours'],
                 $data['cutoff_time'], $data['max_order_qty'],
                 $data['rush_fee'] ?? BRANCH_DEFAULT_RUSH_FEE, $data['outside_zone_fee'] ?? 0, (int) $u['id'],
@@ -189,16 +222,30 @@ function api_branches_update(array $params): void
         ];
     $rushFee = $data['rush_fee'] !== null ? $data['rush_fee'] : (float) ($b['rush_fee'] ?? 0);
     $outsideFee = $data['outside_zone_fee'] !== null ? $data['outside_zone_fee'] : (float) ($b['outside_zone_fee'] ?? 0);
+    $optional = static function (string $key, array $branch, string $column) use ($data) {
+        $v = $data[$key] ?? null;
+        if ($v === null) {
+            return $branch[$column] ?? null;
+        }
+        return $v === '' ? null : $v;
+    };
+    $gcashNumber = $optional('gcash_number', $b, 'gcash_number');
+    $gcashName = $optional('gcash_account_name', $b, 'gcash_account_name');
+    $mayaNumber = $optional('maya_number', $b, 'maya_number');
+    $mayaName = $optional('maya_account_name', $b, 'maya_account_name');
+    $cities = $data['service_area_cities'] === null ? ($b['service_area_cities'] ?? null) : $data['service_area_cities'];
 
     q(
         'UPDATE branches SET name=?, code=?, address=?, street=?, barangay=?, city=?, province=?, region=?,
-            postal_code=?, latitude=?, longitude=?, contact_phone=?, service_area_notes=?,
+            postal_code=?, latitude=?, longitude=?, contact_phone=?, gcash_number=?, gcash_account_name=?,
+            maya_number=?, maya_account_name=?, service_area_notes=?, service_area_cities=?,
             operating_hours=?, cutoff_time=?, max_order_qty=?, rush_fee=?, outside_zone_fee=? WHERE id=?',
         [
             $data['name'], $code, $a['address'], $a['street'], $a['barangay'], $a['city'],
             $a['province'], $a['region'], $a['postal_code'], $a['latitude'], $a['longitude'],
             $data['contact_phone'] === '' ? null : $data['contact_phone'],
-            $data['service_area_notes'] === '' ? null : $data['service_area_notes'],
+            $gcashNumber, $gcashName, $mayaNumber, $mayaName,
+            $data['service_area_notes'] === '' ? null : $data['service_area_notes'], $cities,
             $data['operating_hours'] === '' ? null : $data['operating_hours'],
             $data['cutoff_time'], $data['max_order_qty'], $rushFee, $outsideFee, $id,
         ]

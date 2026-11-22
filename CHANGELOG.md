@@ -2,6 +2,72 @@
 
 All notable changes to this project are recorded here.
 
+## Unreleased / Phase 1 — Prepaid payments
+
+> **Historical note:** the `[2.0.0]` and `[1.0.0]` entries below describe the
+> original credit-enabled system. Credit/utang, customer balances, unpaid
+> reports, the record-payment API and reseller flags mentioned there are **no
+> longer active**; those entries are kept for history only.
+
+### Added
+
+- Manual verification workflow for GCash/Maya order payments:
+  `POST /api/orders/{id}/verify-payment` and
+  `POST /api/orders/{id}/reject-payment` (optional `reason`), with branch-scoped
+  staff/owner access and `verify_payment` / `reject_payment` audit actions.
+- 409 error codes `payment_not_verified`, `duplicate_reference`,
+  `payment_not_required` and `payment_not_submitted`. Approve/deliver now
+  return `payment_not_verified` until a GCash/Maya reference is verified.
+- Unique reference registry spanning orders and sales so a GCash/Maya reference
+  cannot be reused; rejected references can be released and resubmitted by the
+  customer on a pending order.
+- New schema fields: `orders.payment_method`, `payment_reference`,
+  `payment_status`, `payment_verified_by`, `payment_verified_at`;
+  `sales.payment_method`, `payment_reference`; branch `gcash_number`,
+  `gcash_account_name`, `maya_number`, `maya_account_name`,
+  `service_area_cities`; and `cylinder_sizes.deposit_amount`.
+
+### Changed
+
+- Payment methods are now **only** `cash` (cash on delivery), `gcash` and
+  `maya`. GCash/Maya require a customer-supplied `reference_no` (4–80 chars)
+  and staff verification; COD needs none.
+- `GET /api/my/account` returns profile fields plus `empties_owed` only.
+  Customer lists also return `empties_owed`, with no balance, credit or
+  reseller fields.
+- Direct sales accept `pay` in `{cash,gcash,maya}` with an optional
+  `reference_no` (required for GCash/Maya) and no required customer.
+- Reports use a `payment_method` filter instead of `payment_type`; daily and
+  branch-comparison reports no longer show credit-sales, payments-collected or
+  unpaid columns.
+- Empties and cylinder deposits remain; prices, deposits and delivery fees are
+  computed server-only.
+- Frontend: prepaid order/sale forms, reference entry and resubmission, and
+  staff verify/reject actions replace the balance, payment-entry, credit and
+  reseller UI.
+
+### Removed
+
+- Routes: `GET /api/my/payments`, `GET`/`POST /api/payments`,
+  `DELETE /api/payments/{id}` and `GET /api/reports/unpaid`.
+- Fields: `customers.credit_limit`, `is_reseller`, `reseller_status`;
+  `sales.payment_type`; `orders.payment_type`.
+- Error codes `credit_limit`, `payment_too_large` and `no_balance`.
+- The legacy `payments` table remains as read-only historical data; there is no
+  record-payment flow.
+
+### Migration
+
+- New `005_prepaid_payments` migration applies the schema changes and refuses
+  to run with a clear message if any non-void legacy credit sale still has an
+  outstanding amount. Settle those amounts before upgrading. Migrations 006
+  and 007 belong to later phases and are not part of this change.
+
+### Documentation
+
+- API, setup, deployment, configuration, security, privacy/Terms, claims and
+  decision registers updated for prepaid payments and manual verification.
+
 ## [2.0.0] — 2026-11-06
 
 Complete runtime port from Node/Express to PHP 8.1+ and MySQL/MariaDB, with a

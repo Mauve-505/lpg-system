@@ -9,7 +9,7 @@ import { SITE } from './site/content'
 const POINTS = [
   'Choose an active branch and see the sizes it sells.',
   'Track pending, approved, and delivered orders.',
-  'See payments, balances, and empties to return.',
+  'Check prepaid payment status and empties to return.',
 ]
 
 export default function Auth({ mode }) {

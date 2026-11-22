@@ -520,8 +520,9 @@ export function Table({ head, rows, empty = 'Nothing to show yet.', loading = fa
 
 const TONES = {
   delivered: 'ok', received: 'ok', cash: 'ok', active: 'ok', approved: 'info',
-  pending: 'warn', requested: 'warn', credit: 'warn', in_transit: 'info',
-  cancelled: 'bad', void: 'bad', inactive: 'muted',
+  gcash: 'info', maya: 'info', verified: 'ok',
+  pending: 'warn', requested: 'warn', unpaid: 'warn', pending_verification: 'warn', in_transit: 'info',
+  rejected: 'bad', cancelled: 'bad', void: 'bad', inactive: 'muted',
   owner: 'info', branch_admin: 'info', staff: 'info', delivery: 'info', customer: 'info',
 }
 

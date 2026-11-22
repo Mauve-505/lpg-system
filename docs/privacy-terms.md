@@ -19,8 +19,9 @@ The templates cannot know:
 - the lawful basis for each processing purpose;
 - actual retention periods;
 - the hosting location and any cross-border transfers;
-- payment providers actually used and what data they receive;
-- credit terms, delivery areas, refunds and cylinder/deposit rules;
+- the GCash/Maya account details published for each branch and who maintains
+  them (there is no payment gateway or processor integration);
+- delivery areas, refunds and cylinder/deposit rules;
 - CCTV, call recording, analytics or marketing tools added later;
 - the outcome of a Data Protection Impact Assessment, if required;
 - whether the business is a personal information controller or processor in
@@ -56,17 +57,23 @@ this system’s actual data flows.
 | Mobile number | Account, contact, optional OTP |
 | Delivery address | Orders, delivery |
 | Order history | Order list, reports, customer account |
-| Sales and payment records | Receipts, balances, reports, audit |
+| Sales records and payment method | Receipts, reports, audit |
+| GCash/Maya reference numbers | Payment verification, order/sale records, duplicate-reference checks, audit |
+| Branch GCash/Maya account numbers and account names | Payment instructions shown to customers |
+| Payment verification actor and timestamp | Order audit trail |
 | Empties owed / deposits | Customer account, reports |
 | Staff name and branch | Assigned operations, audit |
 | Login attempts (IP, username, user agent, success) | Rate limiting and security |
 | Audit trail (user, action, before/after changes, branch, time) | Accountability |
 | Session data | Keeping the user logged in |
 
-The system does **not** currently store card numbers, bank credentials, or
-government IDs. If GCash/Maya/bank references are entered, only the reference
-number and amount are stored. Do not add card processing without a PCI-DSS
-review.
+The system does **not** currently store card numbers, bank credentials or
+government IDs, and no online payment gateway is integrated. For GCash/Maya
+orders and direct sales it stores the customer-supplied reference number, the
+payment method, the branch account details used for payment instructions, and
+which staff member verified or rejected the reference and when. Reference
+numbers are retained with the order or sale for audit and duplicate checking.
+Do not add card processing without a PCI-DSS review.
 
 Cookies currently in scope:
 
@@ -83,20 +90,23 @@ At minimum, cover:
 
 1. **Controller identity** — registered business name, address, contact, DPO
    and privacy email.
-2. **Scope** — website, customer accounts, orders, deliveries, payments,
-   staff operations.
+2. **Scope** — website, customer accounts, orders, payment references and
+   verification, deliveries, staff operations.
 3. **Data collected** — categories, examples, source (customer, staff, device).
 4. **Purposes and lawful basis** — contract, legitimate interests, consent,
    legal obligation, and which basis applies to which purpose.
-5. **How data is used** — order fulfilment, credit and payment, stock and
-   branch operations, support, security, audit.
+5. **How data is used** — order fulfilment, prepaid payment verification,
+   stock and branch operations, support, security, audit.
 6. **Sharing** — staff assigned to the branch, owner, delivery personnel,
-   payment providers, hosting, SMS provider, professional advisers, regulators.
-   Name actual processors and link to their privacy notices where required.
+   hosting, SMS provider, professional advisers, regulators. Name actual
+   processors and link to their privacy notices where required. GCash/Maya are
+   consumer payment apps used by the customer outside this system; no payment
+   data is sent to them by the API.
 7. **Cross-border transfers** — hosting region and safeguards if data leaves
    the Philippines.
-8. **Retention** — specific periods for accounts, orders, payments, audit and
-   backups, and how deletion/anonymisation works.
+8. **Retention** — specific periods for accounts, orders, order/sale payment
+   references, verification audit and backups, and how deletion/anonymisation
+   works.
 9. **Security** — access control, hashing, branch scoping, audit, backups;
    avoid promising absolute security.
 10. **Data subject rights** — information, objection, access, rectification,
@@ -130,10 +140,11 @@ At minimum, cover:
 3. **Orders** — an order is an offer; branch acceptance/approval; stock and
    price confirmation; cutoff times; maximum quantities; service areas.
 4. **Prices and payment** — currency (PHP), branch-specific prices, deposits,
-   cash/credit, payment references, receipt, price-change effect on future
-   orders (locked prices on existing orders).
-5. **Credit** — approval, limits, due dates, statements, suspension, collection
-   and any interest/charges (only if lawful and disclosed).
+   cash on delivery, GCash and Maya, reference numbers, receipts, and the
+   price-change effect on future orders (locked prices on existing orders).
+5. **Payment verification** — who checks a GCash/Maya reference against the
+   branch account, rejection and resubmission rules, and when an order may be
+   approved or delivered.
 6. **Delivery** — scheduling, access, failed delivery, risk transfer, proof of
    delivery, recipient authority.
 7. **Cylinders, deposits and empties** — ownership, return obligations, deposit
@@ -164,8 +175,8 @@ delivery times, certifications, or “cleaner” fuel claims.
 - [ ] Document lawful basis and purposes for each data set.
 - [ ] Keep a processing inventory / records of processing.
 - [ ] Define retention and deletion schedules, including backups.
-- [ ] Sign data processing agreements with hosting, SMS, payment and support
-      providers.
+- [ ] Sign data processing agreements with hosting, SMS, support and backup
+      providers. There is no payment processor in this phase.
 - [ ] Document cross-border transfer safeguards.
 - [ ] Implement a data-subject request procedure and response tracker.
 - [ ] Implement a breach response plan with NPC notification timelines.

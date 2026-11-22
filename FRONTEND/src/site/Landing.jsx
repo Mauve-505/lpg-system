@@ -154,7 +154,7 @@ function Hero() {
           </motion.h1>
           <motion.p className="lp-lead" {...fade(0.8)}>
             {SITE.tagline} Choose an active branch, send an order, and follow its delivery and
-            balance from your own account.
+            prepaid payment status from your own account.
           </motion.p>
           <motion.div className="lp-cta" {...fade(1)}>
             <a className="lp-btn teal" href="#products">Explore Our Products <ArrowRight size={18} aria-hidden="true" /></a>
@@ -165,7 +165,7 @@ function Hero() {
           <div className="lp-float"><Cylinder /></div>
           <span className="lp-chip c1" aria-hidden="true">Order online</span>
           <span className="lp-chip c2" aria-hidden="true">Track delivery</span>
-          <span className="lp-chip c3" aria-hidden="true">See your balance</span>
+          <span className="lp-chip c3" aria-hidden="true">Pay with GCash or Maya</span>
         </motion.div>
       </div>
     </section>
@@ -178,7 +178,7 @@ function About() {
       <div className="lp-wrap lp-split">
         <div>
           <Head id="about-t" eyebrow={`About ${SITE.brand}`} title="A clearer way to order and supply LPG."
-            text={`${SITE.owner} uses this system to connect customers with its LPG branches. Orders, deliveries, stock, and balances stay with the branch that handles them, so staff can give you a straight answer about your account.`} />
+            text={`${SITE.owner} uses this system to connect customers with its LPG branches. Orders, deliveries, stock, and empties owed stay with the branch that handles them, so staff can give you a straight answer about your account.`} />
           <div className="lp-values">
             {VALUES.map(({ icon: Icon, t, d }, i) => (
               <Reveal key={t} delay={i * 0.08}>
@@ -231,6 +231,9 @@ function BranchCard({ b }) {
     b.address && { icon: MapPin, text: b.address },
     b.contact_phone && { icon: Phone, text: b.contact_phone },
     b.operating_hours && { icon: Clock, text: b.operating_hours },
+    b.gcash_number && { icon: Info, text: `GCash: ${b.gcash_number}${b.gcash_account_name ? ` (${b.gcash_account_name})` : ''}` },
+    b.maya_number && { icon: Info, text: `Maya: ${b.maya_number}${b.maya_account_name ? ` (${b.maya_account_name})` : ''}` },
+    b.service_area_cities && { icon: Info, text: `Service areas: ${Array.isArray(b.service_area_cities) ? b.service_area_cities.join(', ') : String(b.service_area_cities)}` },
     b.service_area_notes && { icon: Info, text: b.service_area_notes },
   ].filter(Boolean)
 
@@ -437,7 +440,7 @@ function CallToAction() {
       <div className="lp-wrap">
         <Reveal>
           <h2 id="cta-t">Ready to place an order?</h2>
-          <p>Create an account, choose your branch, and keep your orders and balances in one place.</p>
+          <p>Create an account, choose your branch, and keep your orders, payment status and empties in one place.</p>
           <div className="lp-cta" style={{ justifyContent: 'center' }}>
             <a className="lp-btn white" href="#contact">Contact Us</a>
             <Link className="lp-btn glass" to={me ? '/app' : '/signup'}>{me ? 'Open dashboard' : 'Create an account'}</Link>

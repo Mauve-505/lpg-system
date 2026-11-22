@@ -53,7 +53,7 @@ export const NAV = [
 
 export const VALUES = [
   { icon: Award, t: 'Dependable supply', d: 'Clear stock records and branch-level accountability help keep supply predictable.' },
-  { icon: Sparkles, t: 'Careful service', d: 'Order details, delivery records and balances are kept in one place for customers and staff.' },
+  { icon: Sparkles, t: 'Careful service', d: 'Order details, delivery records and empties owed are kept in one place for customers and staff.' },
   { icon: ShieldCheck, t: 'Safety first', d: 'Safe handling and safe use come first, always. Follow your supplier and the cylinder label.' },
   { icon: Zap, t: 'Practical tools', d: 'Simple digital records replace guesswork in ordering, delivery and stock control.' },
 ]
@@ -123,9 +123,9 @@ export const FIND = [
 
 export const STEPS = [
   { icon: UserPlus, t: 'Create your account', d: 'Sign up with your name, mobile number, and delivery address. It takes about a minute.' },
-  { icon: ShoppingCart, t: 'Place your order', d: 'Choose a branch, cylinder size and quantity, then pick cash on delivery or credit where available.' },
-  { icon: BadgeCheck, t: 'The branch confirms it', d: 'Branch staff review the order and approve it, or contact you if something needs sorting out.' },
-  { icon: Truck, t: 'Delivered to your door', d: 'Once delivered, your account shows what you have paid, what you owe, and any empty cylinders to return.' },
+  { icon: ShoppingCart, t: 'Place your order', d: 'Choose a branch, cylinder size and quantity, then pay cash on delivery or send a GCash/Maya reference for staff to verify.' },
+  { icon: BadgeCheck, t: 'The branch confirms it', d: 'Branch staff review the order and prepaid reference, then approve it or contact you if something needs sorting out.' },
+  { icon: Truck, t: 'Delivered to your door', d: 'Once delivered, your account shows your order history, payment status, and any empty cylinders to return.' },
 ]
 
 export const CHECKS = [
@@ -140,7 +140,7 @@ export const CHECKS = [
 export const FAQ = [
   ['How do I place an order?', 'Create an account, choose a branch, cylinder size and quantity, and send your order. The branch confirms it and arranges delivery.'],
   ['Can I order from another branch?', 'You can choose any active branch shown in the app. Availability, prices and delivery areas can differ between branches.'],
-  ['Can I pay on credit?', 'You can choose credit when you order. Whether credit is available for your account is up to the branch, who will confirm it.'],
+  ['How do I pay for an order?', 'Choose cash on delivery, or pay through the branch\u2019s GCash or Maya account and enter the payment reference when you order. Staff verify the reference before approving the order.'],
   ['Which cylinder size should I choose?', 'It depends on how much you cook or use. Your branch can advise you. Sizes and availability vary by location.'],
   ['Where should I keep my cylinder?', 'Keep it upright in a well-ventilated area, away from heat, direct sunlight, and ignition sources. Never store cylinders in basements or enclosed spaces.'],
   ['What should I do if I smell gas?', 'Do not light flames or use electrical switches. If it is safe, close the cylinder valve, open doors and windows, leave the area, and call your supplier or local emergency number from a safe distance.'],

@@ -9,7 +9,7 @@ import Privacy from './site/Privacy'
 import Terms from './site/Terms'
 import Auth from './Auth'
 import {
-  Dashboard, Orders, Deliveries, Sales, Payments, Customers, Stock,
+  Dashboard, Orders, Deliveries, Sales, Customers, Stock,
   Transfers, Reports, Branches, Users, Audit, Shop, Team,
 } from './pages'
 import { ChangePasswordForm } from './forms'
@@ -24,7 +24,6 @@ const PAGES = {
   sales: { label: 'nav.sales', Comp: Sales, roles: OPERATIONS },
   deliveries: { label: 'nav.deliveries', Comp: Deliveries, roles: OPERATIONS },
   customers: { label: 'nav.customers', Comp: Customers, roles: OPERATIONS },
-  payments: { label: 'nav.payments', Comp: Payments, roles: OPERATIONS },
   stock: { label: 'nav.stock', Comp: Stock, roles: ['owner'] },
   transfers: { label: 'nav.transfers', Comp: Transfers, roles: OPERATIONS },
   reports: { label: 'nav.reports', Comp: Reports, roles: OPERATIONS },
@@ -344,10 +343,16 @@ export default function App() {
     return () => { live = false }
   }, [me, forced, tick, activeBranch])
 
-  // Keep the browser tab useful without hardcoding a brand in index.html.
+  // Keep the browser tab and search description useful without hardcoding a
+  // brand in index.html. The static description is overridden here so the
+  // public wording always matches the prepaid-payment flow.
   useEffect(() => {
     const section = me ? (PAGES[window.location.pathname.split('/').pop()]?.label) : null
     document.title = section ? `${SITE.brand} · ${tr(section)}` : `${SITE.brand} · LPG distributor system`
+    const description = document.querySelector('meta[name="description"]')
+    if (description) {
+      description.setAttribute('content', `Order LPG from an active branch, follow your delivery, check prepaid payment status, and track empties to return with ${SITE.brand}.`)
+    }
   }, [me, tr])
 
   const ctx = useMemo(() => ({

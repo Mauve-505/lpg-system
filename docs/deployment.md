@@ -107,7 +107,15 @@ php database/seed.php
 
 Migration `001_add_branches` moves legacy rows to `Main Branch (MAIN)`.
 Migration `002_customer_home_branch` adds the optional customer home branch and
-backfills it from each customer's earliest sale, order or payment.
+backfills it from each customer's earliest sale or order.
+
+Migration `005_prepaid_payments` removes the credit/reseller fields and adds the
+prepaid payment and verification fields. It has a preflight guard: if any
+non-void legacy credit sale still has an outstanding amount, the migration is
+refused with a clear message and no statements are applied. Settle those
+amounts first, then run `migrate.php` again. The legacy payments table is left
+intact as read-only history. Migrations 006 and 007 belong to later phases;
+their behaviour is out of scope for this release.
 
 DDL auto-commits in MySQL. If a migration fails halfway, **restore the backup**
 rather than re-running the file.
@@ -283,12 +291,16 @@ Run these against the real HTTPS host:
 1. `GET /api/health` → `200` and `{"ok":true}`.
 2. Load `/`, `/privacy`, `/terms`, `/login`, `/signup` → `200`.
 3. Log in as owner, change the bootstrap password.
-4. Create/verify every real branch. Set address, phone, hours, cutoff and max
-   order quantity.
-5. Replace all prices and record opening stock per branch.
+4. Create/verify every real branch. Set address, phone, hours, cutoff, max
+   order quantity, service-area cities and GCash/Maya account details.
+5. Replace all prices and cylinder deposits, and record opening stock per
+   branch.
 6. Create a staff account in each branch and log in.
-7. Place a customer order, approve, deliver and verify stock and reports.
-8. Record a cash sale, a credit sale, a payment and a void.
+7. Place a cash order and a GCash order with a reference; confirm the GCash
+   order cannot be approved until verified, then verify it as branch staff,
+   approve, deliver and check stock and reports.
+8. Record cash and GCash direct sales, resubmit a rejected reference, and void
+   a sale.
 9. Create, approve, ship and receive a transfer.
 10. Export a CSV report and open it in a spreadsheet.
 11. Deactivate a test staff account and confirm the session ends.

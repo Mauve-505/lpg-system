@@ -31,7 +31,7 @@ export default function Privacy() {
         <ul>
           <li><strong>Account details</strong> — your name, username, mobile number, delivery address, and password (stored only as a one-way hash).</li>
           <li><strong>Order and delivery details</strong> — branch, cylinder sizes and quantities, requested date and time slot, delivery notes, order status, and the staff member who handled the order.</li>
-          <li><strong>Payment and balance records</strong> — amounts paid or charged to credit, payment method and reference, and the running balance on your account.</li>
+          <li><strong>Payment records</strong> — payment method (cash, GCash or Maya), the reference number you supply for a prepaid payment, and the verification status recorded by staff.</li>
           <li><strong>Stock and branch records</strong> — deliveries received, transfers between branches, stock adjustments, and empty-cylinder returns.</li>
           <li><strong>Staff records</strong> — work contact details, assigned branch, role, account status, and audit entries for actions taken in the system.</li>
           <li><strong>Technical and security data</strong> — session identifier, IP address, browser user agent, and timestamps recorded in security logs and the audit trail.</li>
@@ -49,8 +49,8 @@ export default function Privacy() {
         <ul>
           <li>To create and secure your account, and to verify who is using it.</li>
           <li>To accept, approve, prepare, deliver, and record LPG orders.</li>
-          <li>To keep accurate branch stock, sales, payment, and credit records.</li>
-          <li>To contact you about an order, a delivery, a balance, or a safety issue.</li>
+          <li>To keep accurate branch stock, sales, and payment verification records.</li>
+          <li>To contact you about an order, a delivery, a payment reference, or a safety issue.</li>
           <li>To prevent fraud, abuse, and unauthorised access, and to investigate incidents.</li>
           <li>To produce branch and management reports, using aggregated or de-identified data where practicable.</li>
           <li>To comply with tax, accounting, safety, and other legal obligations that apply to the business.</li>
@@ -79,8 +79,8 @@ export default function Privacy() {
         </p>
         <p>
           We may share information with service providers that help us run the
-          business — for example, hosting, SMS or email delivery, or payment
-          processing — under appropriate confidentiality and security terms. We may
+          business — for example, hosting or SMS and email delivery — under
+          appropriate confidentiality and security terms. We may
           also disclose information when required by law, a court, a regulator, or a
           lawful request from the NPC or another competent authority.
         </p>
@@ -95,8 +95,8 @@ export default function Privacy() {
         <h2>6. How long we keep it</h2>
         <p>
           We keep personal information only for as long as needed for the purposes
-          above, including the period required to resolve orders, balances, and
-          disputes. Transaction and accounting records may be kept for the period
+          above, including the period required to resolve orders, payment reference
+          questions, and disputes. Transaction and accounting records may be kept for the period
           required by Philippine tax and business-record rules. Security logs and
           audit entries are kept for a limited period for investigation and
           accountability. When information is no longer needed, we delete it or

@@ -76,6 +76,12 @@ function section(string $name): void
     echo "\n== {$name} ==\n";
 }
 
+/** True when a payload explicitly carries the key with a null value. */
+function has_null_field(array $payload, string $key): bool
+{
+    return array_key_exists($key, $payload) && $payload[$key] === null;
+}
+
 /* ------------------------------------------------------------------------- */
 /* HTTP client (cookie jar + CSRF)                                           */
 /* ------------------------------------------------------------------------- */
@@ -247,6 +253,26 @@ function reset_database(string $root, array $db): PDO
     return $pdo;
 }
 
+/**
+ * Test-harness compatibility shim.
+ *
+ * database/schema.sql currently omits `users.phone_verified`, but
+ * api/src/auth.php:152 still selects that column when loading a session.
+ * Restore it in the disposable test database only so the rest of the suite can
+ * run; no application or schema file is changed (see the final report).
+ */
+function ensure_schema_compatibility(PDO $pdo): void
+{
+    $st = $pdo->prepare(
+        "SELECT COUNT(*) FROM information_schema.COLUMNS
+         WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='users' AND COLUMN_NAME='phone_verified'"
+    );
+    $st->execute();
+    if ((int) $st->fetchColumn() === 0) {
+        $pdo->exec('ALTER TABLE users ADD COLUMN phone_verified TINYINT(1) NOT NULL DEFAULT 0');
+    }
+}
+
 function seed_owner(PDO $pdo): void
 {
     $st = $pdo->prepare(
@@ -347,12 +373,140 @@ function stop_server(array $server): void
     @proc_close($server['process']);
 }
 
+/** Run a project CLI script with the same PHP binary and a temporary config. */
+function run_cli_script(string $root, string $configFile, string $script, array $args = []): array
+{
+    $env = getenv();
+    if (!is_array($env)) {
+        $env = [];
+    }
+    $env['LPG_CONFIG_FILE'] = $configFile;
+    $path = $root . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $script);
+    $command = escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg($path);
+    foreach ($args as $arg) {
+        $command .= ' ' . escapeshellarg((string) $arg);
+    }
+    $descriptors = [
+        0 => ['pipe', 'r'],
+        1 => ['pipe', 'w'],
+        2 => ['pipe', 'w'],
+    ];
+    $process = proc_open($command, $descriptors, $pipes, $root, $env);
+    if (!is_resource($process)) {
+        throw new RuntimeException('Could not start the migration CLI.');
+    }
+    fclose($pipes[0]);
+    $stdout = stream_get_contents($pipes[1]);
+    $stderr = stream_get_contents($pipes[2]);
+    fclose($pipes[1]);
+    fclose($pipes[2]);
+    $status = proc_close($process);
+    return [
+        'status' => $status,
+        'stdout' => (string) $stdout,
+        'stderr' => (string) $stderr,
+    ];
+}
+
+/**
+ * Exercise the 005 preflight guard against a disposable legacy-schema DB.
+ * The guard runs before --dry-run, so no DDL is needed to verify the refusal
+ * and the successful pass after the balance is settled.
+ */
+function check_migration_guard(string $root, array $config): void
+{
+    section('Migration 005 preflight guard');
+
+    $migDb = 'lpg_mig_test';
+    $creds = $config['db'];
+    $refusal = 'Outstanding credit balances exist. Settle them before running migration 005.';
+    $serverDsn = sprintf('mysql:host=%s;port=%d;charset=utf8mb4', $creds['host'], (int) $creds['port']);
+    $server = new PDO($serverDsn, (string) $creds['user'], (string) $creds['pass'], [
+        PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+    ]);
+
+    $configFile = tempnam(sys_get_temp_dir(), 'lpg_mig_cfg_');
+    if ($configFile === false) {
+        throw new RuntimeException('Could not create a temporary migration config.');
+    }
+    $migConfig = $config;
+    $migConfig['db']['name'] = $migDb;
+    file_put_contents($configFile, "<?php\nreturn " . var_export($migConfig, true) . ";\n");
+
+    try {
+        $server->exec('DROP DATABASE IF EXISTS `' . $migDb . '`');
+        $server->exec('CREATE DATABASE `' . $migDb . '` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci');
+        $mig = new PDO(
+            $serverDsn . ';dbname=' . $migDb,
+            (string) $creds['user'],
+            (string) $creds['pass'],
+            [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]
+        );
+        // Minimal legacy (pre-005) shape: enough for the 005 preflight query.
+        $mig->exec(
+            'CREATE TABLE sales (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                customer_id INT NOT NULL,
+                branch_id INT NOT NULL,
+                payment_type VARCHAR(20) NOT NULL,
+                total_amount DECIMAL(10,2) NOT NULL,
+                is_void TINYINT(1) NOT NULL DEFAULT 0
+             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4'
+        );
+        $mig->exec(
+            'CREATE TABLE payments (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                customer_id INT NOT NULL,
+                branch_id INT NOT NULL,
+                amount DECIMAL(10,2) NOT NULL,
+                is_void TINYINT(1) NOT NULL DEFAULT 0
+             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4'
+        );
+        $mig->exec(
+            'CREATE TABLE schema_migrations (
+                version VARCHAR(50) PRIMARY KEY,
+                applied_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4'
+        );
+        $mark = $mig->prepare('INSERT INTO schema_migrations (version) VALUES (?)');
+        foreach ([
+            '001_add_branches',
+            '002_customer_home_branch',
+            '003_structured_names_addresses_delivery',
+            '004_rush_same_day_fee',
+        ] as $version) {
+            $mark->execute([$version]);
+        }
+        $mig->exec(
+            "INSERT INTO sales (customer_id, branch_id, payment_type, total_amount, is_void) VALUES
+             (1, 1, 'credit', 100.00, 0),
+             (1, 1, 'credit', 500.00, 1),
+             (2, 1, 'cash', 50.00, 0)"
+        );
+
+        $blocked = run_cli_script($root, $configFile, 'database/migrate.php', ['--dry-run', '--no-backup']);
+        check($blocked['status'] !== 0, 'migrate.php exits non-zero while a credit balance is outstanding', 'status=' . $blocked['status'] . ' stdout=' . substr($blocked['stdout'], 0, 300) . ' stderr=' . substr($blocked['stderr'], 0, 300));
+        check(strpos($blocked['stderr'], $refusal) !== false, 'stderr contains the exact 005 refusal message', substr($blocked['stderr'], 0, 300));
+        check(strpos($blocked['stdout'], 'Applying 005_') === false, 'guarded migration is not applied while credit is outstanding');
+
+        $mig->exec('INSERT INTO payments (customer_id, branch_id, amount, is_void) VALUES (1, 1, 100.00, 0)');
+        $settled = run_cli_script($root, $configFile, 'database/migrate.php', ['--dry-run', '--no-backup']);
+        check($settled['status'] === 0, 'migrate.php proceeds once the credit balance is settled', 'status=' . $settled['status'] . ' stdout=' . substr($settled['stdout'], 0, 300) . ' stderr=' . substr($settled['stderr'], 0, 300));
+        check(strpos($settled['stderr'], $refusal) === false, 'guard no longer refuses after the payment is recorded', substr($settled['stderr'], 0, 300));
+        check(strpos($settled['stdout'], 'Dry run: no changes made.') !== false, 'dry run completes after the guard passes');
+    } finally {
+        $server->exec('DROP DATABASE IF EXISTS `' . $migDb . '`');
+        @unlink($configFile);
+    }
+}
+
 /* ------------------------------------------------------------------------- */
 /* Boot                                                                      */
 /* ------------------------------------------------------------------------- */
 
 echo "Resetting {$testDb} from database/schema.sql ...\n";
 $pdo = reset_database($root, $db);
+ensure_schema_compatibility($pdo);
 seed_owner($pdo);
 
 $mainId = (int) $pdo->query("SELECT id FROM branches WHERE code='MAIN' LIMIT 1")->fetchColumn();
@@ -836,17 +990,45 @@ try {
     check(is_array($r['json']) && count($r['json']) >= 2, 'customer sees their orders');
 
     /* --------------------------------------------------------------------- */
-    section('Credit sale, payment validation and unpaid report');
+    section('Removed payment routes, account shape and direct sale');
     /* --------------------------------------------------------------------- */
+
+    $r = $customer->request('GET', '/api/my/payments');
+    expect($r, 404, 'GET /api/my/payments is removed');
+    $r = $customer->request('GET', '/api/payments');
+    expect($r, 404, 'GET /api/payments is removed');
+    $r = $customer->request('POST', '/api/payments', [
+        'customer_id' => $customerId,
+        'amount' => 50,
+        'method' => 'cash',
+    ]);
+    expect($r, 404, 'POST /api/payments is removed');
+    $r = $owner->request('DELETE', '/api/payments/1');
+    expect($r, 404, 'DELETE /api/payments/{id} is removed');
+    $r = $owner->request('GET', '/api/reports/unpaid?branch_id=' . $mainId);
+    expect($r, 404, 'GET /api/reports/unpaid is removed');
 
     $r = $staff->request('POST', '/api/sales', [
         'pay' => 'credit',
         'customer_id' => $customerId,
         'items' => [['size_id' => $size1, 'qty' => 1, 'back' => 0]],
     ]);
-    expect($r, 201, 'staff records a credit sale to the customer');
-    $creditSaleId = (int) ($r['json']['id'] ?? 0);
-    check(abs((float) ($r['json']['total_amount'] ?? 0) - 100.0) < 0.001, 'credit sale uses the main branch price');
+    expect($r, 422, 'credit is no longer a valid sale payment method');
+    check(($r['json']['code'] ?? '') === 'validation_error', 'credit sale returns validation_error');
+
+    // A regular cash sale keeps the customer's main-branch activity (and the
+    // empties/stock assertions below) without any credit balance concept.
+    $r = $staff->request('POST', '/api/sales', [
+        'pay' => 'cash',
+        'customer_id' => $customerId,
+        'items' => [['size_id' => $size1, 'qty' => 1, 'back' => 0]],
+    ]);
+    expect($r, 201, 'staff records a cash sale to the customer');
+    $cashSaleId = (int) ($r['json']['id'] ?? 0);
+    check($cashSaleId > 0, 'cash sale has an id');
+    check(($r['json']['payment_method'] ?? '') === 'cash', 'direct sale exposes payment_method cash');
+    check(has_null_field(is_array($r['json']) ? $r['json'] : [], 'payment_reference'), 'cash sale has no payment reference');
+    check(abs((float) ($r['json']['total_amount'] ?? 0) - 100.0) < 0.001, 'cash sale uses the main branch price');
 
     // The customer was created by public signup (no home branch), but this
     // main-branch transaction now makes it manageable by main staff.
@@ -858,64 +1040,23 @@ try {
 
     $r = $staff->request('GET', '/api/customers?q=Test%20Customer');
     expect($r, 200, 'staff customer list reloads after the sale');
-    $staffSeesCustomer = false;
+    $staffCustomer = null;
     foreach (is_array($r['json']) ? $r['json'] : [] as $row) {
         if ((int) ($row['id'] ?? 0) === $customerId) {
-            $staffSeesCustomer = true;
+            $staffCustomer = $row;
         }
     }
-    check($staffSeesCustomer, 'main staff list includes a customer with main-branch activity');
-
-    $r = $owner->request('GET', '/api/reports/unpaid?branch_id=' . $mainId);
-    expect($r, 200, 'unpaid report loads');
-    $unpaidRow = null;
-    foreach (($r['json']['rows'] ?? []) as $row) {
-        if ((int) ($row['id'] ?? 0) === $customerId) {
-            $unpaidRow = $row;
-        }
+    check($staffCustomer !== null, 'main staff list includes a customer with main-branch activity');
+    foreach (['balance', 'credit_limit', 'is_reseller', 'reseller_status'] as $removed) {
+        check($staffCustomer !== null && !array_key_exists($removed, $staffCustomer), "customer list no longer exposes {$removed}");
     }
-    check($unpaidRow !== null, 'unpaid report includes the customer');
-    check(abs((float) ($unpaidRow['balance'] ?? 0) - 100.0) < 0.001, 'unpaid balance is 100');
-
-    $r = $staff->request('POST', '/api/payments', [
-        'customer_id' => $customerId,
-        'amount' => 150,
-        'method' => 'cash',
-    ]);
-    expect($r, 422, 'payment larger than the balance is rejected');
-    check(($r['json']['code'] ?? '') === 'payment_too_large', 'overpayment returns payment_too_large');
-
-    $r = $staff->request('POST', '/api/payments', [
-        'customer_id' => $customerId,
-        'amount' => 100,
-        'method' => 'gcash',
-        'reference_no' => 'GC-1001',
-    ]);
-    expect($r, 201, 'staff records a valid partial method payment');
-    check(abs((float) ($r['json']['balance_after'] ?? -1)) < 0.001, 'payment clears the balance');
-
-    $r = $staff->request('POST', '/api/payments', [
-        'customer_id' => $customerId,
-        'amount' => 10,
-        'method' => 'cash',
-    ]);
-    expect($r, 409, 'payment with no remaining balance is rejected');
-    check(($r['json']['code'] ?? '') === 'no_balance', 'zero balance returns no_balance');
-
-    $r = $owner->request('GET', '/api/reports/unpaid?branch_id=' . $mainId);
-    expect($r, 200, 'unpaid report reloads after payment');
-    $stillUnpaid = false;
-    foreach (($r['json']['rows'] ?? []) as $row) {
-        if ((int) ($row['id'] ?? 0) === $customerId) {
-            $stillUnpaid = true;
-        }
-    }
-    check(!$stillUnpaid, 'fully paid customer disappears from unpaid report');
 
     $r = $customer->request('GET', '/api/my/account');
     expect($r, 200, 'customer account loads');
-    check(abs((float) ($r['json']['balance'] ?? -1)) < 0.001, 'customer balance is zero after payment');
-    check((int) ($r['json']['empties_owed'] ?? -1) === 2, 'customer owes 2 empties (1 from order + 1 from credit sale)');
+    foreach (['balance', 'credit_limit', 'is_reseller', 'reseller_status', 'by_branch'] as $removed) {
+        check(!array_key_exists($removed, is_array($r['json']) ? $r['json'] : []), "customer account no longer exposes {$removed}");
+    }
+    check((int) ($r['json']['empties_owed'] ?? -1) === 2, 'customer owes 2 empties (1 from order + 1 from cash sale)');
 
     /* --------------------------------------------------------------------- */
     section('Inter-branch transfers');
@@ -984,9 +1125,9 @@ try {
             $mainStock = $row;
         }
     }
-    check((int) ($mainStock['full_qty'] ?? -1) === 47, 'main full stock is 47 after credit sale and transfer out');
+    check((int) ($mainStock['full_qty'] ?? -1) === 47, 'main full stock is 47 after cash sale and transfer out');
     check((int) ($mainStock['empty_qty'] ?? -1) === 9, 'main empty stock is 9 after transfer out');
-    check((int) ($mainStock['out_qty'] ?? -1) === 1, 'main cylinders-with-customers is 1 after credit sale');
+    check((int) ($mainStock['out_qty'] ?? -1) === 1, 'main cylinders-with-customers is 1 after cash sale');
 
     $r = $owner->request('GET', '/api/reports/stock?branch_id=' . $northId);
     expect($r, 200, 'north stock reloads after delivery and transfer');
@@ -1039,8 +1180,30 @@ try {
 
     $r = $owner->request('GET', '/api/reports/daily?from=' . $today . '&to=' . $today);
     expect($r, 200, 'daily report loads');
-    check(abs((float) ($r['json']['totals']['total_sales'] ?? 0) - 320.0) < 0.001, 'daily total sales are 320 (100 credit + 220 delivery)');
-    check(isset($r['json']['rows'][0]['cash_collected']), 'daily report includes cash collected');
+    check(abs((float) ($r['json']['totals']['total_sales'] ?? 0) - 320.0) < 0.001, 'daily total sales are 320 (100 cash sale + 220 delivery)');
+    $dailyRow = $r['json']['rows'][0] ?? [];
+    $dailyTotals = is_array($r['json']['totals'] ?? null) ? $r['json']['totals'] : [];
+    foreach (['cash', 'gcash', 'maya', 'total_sales', 'deposits', 'voided_sales', 'full_received', 'empties_returned'] as $key) {
+        check(array_key_exists($key, $dailyRow), "daily report row exposes {$key}");
+        check(array_key_exists($key, $dailyTotals), "daily report totals expose {$key}");
+    }
+    foreach (['cash_sales', 'credit_sales', 'payments', 'cash_collected'] as $key) {
+        check(!array_key_exists($key, $dailyRow) && !array_key_exists($key, $dailyTotals), "daily report no longer exposes {$key}");
+    }
+    check(abs((float) ($dailyTotals['cash'] ?? -1) - 320.0) < 0.001, 'daily cash total is the 100 sale plus the 220 delivery');
+    check(abs((float) ($dailyTotals['gcash'] ?? -1)) < 0.001 && abs((float) ($dailyTotals['maya'] ?? -1)) < 0.001, 'daily GCash and Maya totals start at zero');
+
+    $r = $owner->request('GET', '/api/dashboard');
+    expect($r, 200, 'dashboard loads');
+    foreach (['sold', 'cash', 'gcash', 'maya', 'empties_owed', 'open_orders', 'stock', 'branch', 'date'] as $key) {
+        check(array_key_exists($key, is_array($r['json']) ? $r['json'] : []), "dashboard exposes {$key}");
+    }
+    foreach (['payments', 'unpaid', 'cash_sales'] as $key) {
+        check(!array_key_exists($key, is_array($r['json']) ? $r['json'] : []), "dashboard no longer exposes {$key}");
+    }
+    check(abs((float) ($r['json']['sold'] ?? -1) - 320.0) < 0.001, 'dashboard sold matches the posted sales');
+    check((int) ($r['json']['empties_owed'] ?? -1) === 2, 'dashboard reports 2 empties owed');
+    check(is_array($r['json']['stock'] ?? null) && count($r['json']['stock']) > 0, 'dashboard stock rows are present');
 
     $r = $owner->request('GET', '/api/reports/sales?from=' . $today . '&to=' . $today . '&format=csv');
     expect($r, 200, 'sales register CSV downloads');
@@ -1049,6 +1212,22 @@ try {
     check(strpos((string) $r['body'], 'Sale no.') !== false, 'CSV contains the expected header row');
     check(strpos((string) ($r['headers']['content-disposition'] ?? ''), 'attachment') !== false, 'CSV is served as an attachment');
 
+    $r = $owner->request('GET', '/api/reports/sales?from=' . $today . '&to=' . $today . '&payment_method=cash');
+    expect($r, 200, 'sales report filters by payment_method');
+    $allCash = true;
+    foreach (($r['json']['rows'] ?? []) as $row) {
+        if (($row['payment_method'] ?? '') !== 'cash') {
+            $allCash = false;
+        }
+        check(array_key_exists('payment_method', $row) && array_key_exists('payment_reference', $row), 'sales report row exposes payment_method and payment_reference');
+        check(!array_key_exists('payment_type', $row), 'sales report row no longer exposes payment_type');
+    }
+    check($allCash, 'payment_method=cash returns only cash sales');
+
+    $r = $owner->request('GET', '/api/reports/sales?from=' . $today . '&to=' . $today . '&payment_method=credit');
+    expect($r, 422, 'credit is rejected as a payment_method filter');
+    check(($r['json']['code'] ?? '') === 'validation_error', 'bad payment_method filter returns validation_error');
+
     $r = $staff->request('GET', '/api/reports/branch-comparison?from=' . $today . '&to=' . $today);
     expect($r, 403, 'staff cannot read the owner branch comparison');
 
@@ -1056,6 +1235,17 @@ try {
     expect($r, 200, 'owner loads the branch comparison');
     check(is_array($r['json']['rows'] ?? null) && count($r['json']['rows']) >= 3, 'branch comparison includes all branches');
     check(abs((float) ($r['json']['totals']['sales_total'] ?? 0) - 320.0) < 0.001, 'branch comparison sales total is 320');
+    $comparisonRow = $r['json']['rows'][0] ?? [];
+    $comparisonTotals = is_array($r['json']['totals'] ?? null) ? $r['json']['totals'] : [];
+    foreach (['sales_total', 'cash', 'gcash', 'maya', 'deposits', 'full_qty', 'empty_qty', 'out_qty', 'open_orders'] as $key) {
+        check(array_key_exists($key, $comparisonRow), "branch comparison row exposes {$key}");
+    }
+    foreach (['sales_total', 'cash', 'gcash', 'maya', 'deposits', 'full_qty', 'empty_qty', 'out_qty'] as $key) {
+        check(array_key_exists($key, $comparisonTotals), "branch comparison totals expose {$key}");
+    }
+    foreach (['credit_sales', 'payments', 'unpaid', 'cash_collected'] as $key) {
+        check(!array_key_exists($key, $comparisonRow) && !array_key_exists($key, $comparisonTotals), "branch comparison no longer exposes {$key}");
+    }
 
     $r = $owner->request('GET', '/api/reports/sales?from=bad-date');
     expect($r, 422, 'invalid report date is rejected');
@@ -1138,6 +1328,11 @@ try {
         'barangay' => 'Tulay',
         'city' => 'Jolo',
         'contact_phone' => '09172222222',
+        'gcash_number' => '09170000001',
+        'gcash_account_name' => 'South Gas GCash',
+        'maya_number' => '09170000002',
+        'maya_account_name' => 'South Gas Maya',
+        'service_area_cities' => ['Jolo', 'Zamboanga City'],
         'operating_hours' => '08:00-18:00',
         'max_order_qty' => 10,
         'rush_fee' => 25,
@@ -1151,6 +1346,22 @@ try {
     check(($r['json']['postal_code'] ?? '') === '7400', 'branch postal code is derived');
     check(abs((float) ($r['json']['rush_fee'] ?? -1) - 25.0) < 0.001, 'branch rush fee is saved');
     check(abs((float) ($r['json']['outside_zone_fee'] ?? -1) - 40.0) < 0.001, 'branch outside-zone fee is saved');
+    check(($r['json']['gcash_number'] ?? '') === '09170000001', 'branch create saves the GCash number');
+    check(($r['json']['gcash_account_name'] ?? '') === 'South Gas GCash', 'branch create saves the GCash account name');
+    check(($r['json']['maya_number'] ?? '') === '09170000002', 'branch create saves the Maya number');
+    check(($r['json']['maya_account_name'] ?? '') === 'South Gas Maya', 'branch create saves the Maya account name');
+    check(($r['json']['service_area_cities'] ?? '') === 'Jolo,Zamboanga City', 'branch create accepts service_area_cities as an array');
+
+    $r = $owner->request('PUT', '/api/branches/' . $southId, [
+        'name' => 'South Branch',
+        'code' => 'south',
+        'service_area_cities' => 'Jolo, Zamboanga City',
+        'maya_number' => '09170000003',
+    ]);
+    expect($r, 200, 'owner updates branch payment and service-area details');
+    check(($r['json']['service_area_cities'] ?? '') === 'Jolo, Zamboanga City', 'branch update accepts service_area_cities as a string');
+    check(($r['json']['maya_number'] ?? '') === '09170000003', 'branch update saves the Maya number');
+    check(($r['json']['gcash_number'] ?? '') === '09170000001', 'branch update preserves the GCash number');
 
     $r = $anon->request('GET', '/api/branches/public', null, [], false);
     expect($r, 200, 'public branch list loads after structured address');
@@ -1163,6 +1374,11 @@ try {
     check($southPublic !== null, 'public branch list includes the south branch');
     check(abs((float) ($southPublic['rush_fee'] ?? -1) - 25.0) < 0.001, 'public branch exposes the rush fee');
     check(abs((float) ($southPublic['outside_zone_fee'] ?? -1) - 40.0) < 0.001, 'public branch exposes the outside-zone fee');
+    check(($southPublic['gcash_number'] ?? '') === '09170000001', 'public branch exposes the GCash number');
+    check(($southPublic['gcash_account_name'] ?? '') === 'South Gas GCash', 'public branch exposes the GCash account name');
+    check(($southPublic['maya_number'] ?? '') === '09170000003', 'public branch exposes the Maya number');
+    check(($southPublic['maya_account_name'] ?? '') === 'South Gas Maya', 'public branch exposes the Maya account name');
+    check(($southPublic['service_area_cities'] ?? '') === 'Jolo, Zamboanga City', 'public branch exposes the service-area cities');
 
     $r = $owner->request('POST', '/api/branches', [
         'name' => 'Bad Barangay Branch',
@@ -1580,21 +1796,191 @@ try {
 
     $r = $newCustomer->request('POST', '/api/my/orders', [
         'branch_id' => $southId,
-        'pay' => 'credit',
+        'pay' => 'cash',
         'requested_date' => date('Y-m-d', strtotime('+2 days')),
         'is_outside_zone' => true,
         'items' => [['size_id' => $size1, 'qty' => 1]],
     ]);
-    expect($r, 201, 'customer places a credit order without a new delivery address');
-    $creditOrderId = (int) ($r['json']['id'] ?? 0);
+    expect($r, 201, 'customer places a COD order without a new delivery address');
+    $codOrderId = (int) ($r['json']['id'] ?? 0);
     check(($r['json']['delivery_address'] ?? '') === '5 Market Lane, Tulay, Jolo, Sulu 7400', 'order falls back to the saved customer address');
     check(abs((float) ($r['json']['delivery_latitude'] ?? -1) - 6.0525) < 0.00001, 'order falls back to the saved map pin');
+    check(($r['json']['payment_method'] ?? '') === 'cash', 'COD order uses payment_method cash');
+    check(($r['json']['payment_status'] ?? '') === 'unpaid', 'COD order starts unpaid');
 
-    $r = $owner->request('POST', '/api/orders/' . $creditOrderId . '/deliver', [], ['X-Branch-Id: ' . $southId]);
-    expect($r, 200, 'owner delivers the credit order');
+    $r = $owner->request('POST', '/api/orders/' . $codOrderId . '/deliver', [], ['X-Branch-Id: ' . $southId]);
+    expect($r, 200, 'owner delivers the COD order');
     $r = $newCustomer->request('GET', '/api/my/account');
-    expect($r, 200, 'customer account loads after fee-aware credit delivery');
-    check(abs((float) ($r['json']['balance'] ?? -1) - ($southUnit + 40)) < 0.001, 'credit balance includes the outside-zone fee');
+    expect($r, 200, 'customer account loads after fee-aware COD delivery');
+    check(!array_key_exists('balance', is_array($r['json']) ? $r['json'] : []), 'customer account has no balance field');
+    check((int) ($r['json']['empties_owed'] ?? -1) === 2, 'customer owes 2 empties after two deliveries');
+
+    /* --------------------------------------------------------------------- */
+    section('Prepaid orders: verification, duplicates and resubmission');
+    /* --------------------------------------------------------------------- */
+
+    $future = date('Y-m-d', strtotime('+3 days'));
+    $northHeader = ['X-Branch-Id: ' . $northId];
+    $prepaidOrder = static function (string $pay, ?string $reference) use ($future, $northId, $size1): array {
+        $body = [
+            'branch_id' => $northId,
+            'pay' => $pay,
+            'requested_date' => $future,
+            'notes' => 'Prepaid contract test',
+            'items' => [['size_id' => $size1, 'qty' => 1, 'deposit_amount' => 0]],
+        ];
+        if ($reference !== null) {
+            $body['reference_no'] = $reference;
+        }
+        return $body;
+    };
+
+    // Payment method and reference validation on customer orders.
+    $r = $customer->request('POST', '/api/my/orders', $prepaidOrder('credit', null));
+    expect($r, 422, 'an order cannot be paid with the removed credit method');
+    check(($r['json']['code'] ?? '') === 'validation_error', 'invalid pay value returns validation_error');
+    $r = $customer->request('POST', '/api/my/orders', $prepaidOrder('gcash', null));
+    expect($r, 422, 'a GCash order requires a reference number');
+    check(($r['json']['field'] ?? '') === 'reference_no', 'missing reference reports the reference_no field');
+    $r = $customer->request('POST', '/api/my/orders', $prepaidOrder('maya', null));
+    expect($r, 422, 'a Maya order requires a reference number');
+    $r = $customer->request('POST', '/api/my/orders', $prepaidOrder('gcash', 'ab'));
+    expect($r, 422, 'a reference shorter than 4 characters is rejected');
+    $r = $customer->request('POST', '/api/my/orders', $prepaidOrder('gcash', 'GC BAD REF'));
+    expect($r, 422, 'a reference with invalid characters is rejected');
+
+    // (a) GCash order: approve and deliver are blocked until staff verification.
+    $gcashRef = 'GC-PHASE1-0001';
+    $r = $customer->request('POST', '/api/my/orders', $prepaidOrder('gcash', $gcashRef));
+    expect($r, 201, 'customer places a GCash order');
+    $gcashOrderId = (int) ($r['json']['id'] ?? 0);
+    check($gcashOrderId > 0, 'GCash order has an id');
+    check(($r['json']['payment_method'] ?? '') === 'gcash', 'GCash order exposes payment_method gcash');
+    check(($r['json']['payment_reference'] ?? '') === $gcashRef, 'GCash order keeps the reference');
+    check(($r['json']['payment_status'] ?? '') === 'pending_verification', 'GCash order starts pending_verification');
+    $freshOrder = is_array($r['json']) ? $r['json'] : [];
+    check(
+        has_null_field($freshOrder, 'payment_verified_by') && has_null_field($freshOrder, 'payment_verified_at'),
+        'new GCash order has no verifier'
+    );
+
+    $r = $staff->request('POST', '/api/orders/' . $gcashOrderId . '/verify-payment', null, $northHeader);
+    expect($r, 403, 'main staff cannot verify a north-branch payment');
+    check(($r['json']['code'] ?? '') === 'branch_forbidden', 'cross-branch verification returns branch_forbidden');
+    $r = $owner->request('POST', '/api/orders/' . $gcashOrderId . '/approve', null, $northHeader);
+    expect($r, 409, 'GCash order cannot be approved before verification');
+    check(($r['json']['code'] ?? '') === 'payment_not_verified', 'early approve returns payment_not_verified');
+    $r = $owner->request('POST', '/api/orders/' . $gcashOrderId . '/deliver', [], $northHeader);
+    expect($r, 409, 'GCash order cannot be delivered before verification');
+    check(($r['json']['code'] ?? '') === 'payment_not_verified', 'early deliver returns payment_not_verified');
+
+    $r = $owner->request('POST', '/api/orders/' . $gcashOrderId . '/verify-payment', null, $northHeader);
+    expect($r, 200, 'staff verifies the GCash reference');
+    check(($r['json']['payment_status'] ?? '') === 'verified', 'verification sets payment_status verified');
+    $r = $owner->request('GET', '/api/orders/' . $gcashOrderId, null, $northHeader);
+    expect($r, 200, 'verified order reloads');
+    check((int) ($r['json']['payment_verified_by'] ?? 0) > 0, 'verification records payment_verified_by');
+    check(!empty($r['json']['payment_verified_at']), 'verification records payment_verified_at');
+
+    $r = $owner->request('POST', '/api/orders/' . $gcashOrderId . '/approve', null, $northHeader);
+    expect($r, 200, 'verified GCash order can be approved');
+    $r = $owner->request('POST', '/api/orders/' . $gcashOrderId . '/deliver', ['proof_of_delivery' => 'GCash receipt checked'], $northHeader);
+    expect($r, 200, 'verified GCash order can be delivered');
+    $gcashSaleId = (int) ($r['json']['sale_id'] ?? 0);
+    check($gcashSaleId > 0, 'GCash delivery creates a sale');
+    $r = $owner->request('GET', '/api/sales/' . $gcashSaleId, null, $northHeader);
+    expect($r, 200, 'GCash delivered sale reloads');
+    check(($r['json']['payment_method'] ?? '') === 'gcash', 'delivered sale copies payment_method gcash');
+    check(($r['json']['payment_reference'] ?? '') === $gcashRef, 'delivered sale copies the GCash reference');
+
+    // The same rule applies to Maya orders.
+    $mayaRef = 'MAYA-PHASE1-0002';
+    $r = $customer->request('POST', '/api/my/orders', $prepaidOrder('maya', $mayaRef));
+    expect($r, 201, 'customer places a Maya order');
+    $mayaOrderId = (int) ($r['json']['id'] ?? 0);
+    check(($r['json']['payment_status'] ?? '') === 'pending_verification', 'Maya order starts pending_verification');
+    $r = $owner->request('POST', '/api/orders/' . $mayaOrderId . '/approve', null, $northHeader);
+    expect($r, 409, 'Maya order cannot be approved before verification');
+    check(($r['json']['code'] ?? '') === 'payment_not_verified', 'early Maya approve returns payment_not_verified');
+    $r = $owner->request('POST', '/api/orders/' . $mayaOrderId . '/deliver', [], $northHeader);
+    expect($r, 409, 'Maya order cannot be delivered before verification');
+    check(($r['json']['code'] ?? '') === 'payment_not_verified', 'early Maya deliver returns payment_not_verified');
+    $r = $owner->request('POST', '/api/orders/' . $mayaOrderId . '/verify-payment', null, $northHeader);
+    expect($r, 200, 'staff verifies the Maya reference');
+    $r = $owner->request('POST', '/api/orders/' . $mayaOrderId . '/approve', null, $northHeader);
+    expect($r, 200, 'verified Maya order can be approved');
+    $r = $owner->request('POST', '/api/orders/' . $mayaOrderId . '/deliver', [], $northHeader);
+    expect($r, 200, 'verified Maya order can be delivered');
+    $mayaSaleId = (int) ($r['json']['sale_id'] ?? 0);
+    $r = $owner->request('GET', '/api/sales/' . $mayaSaleId, null, $northHeader);
+    expect($r, 200, 'Maya delivered sale reloads');
+    check(($r['json']['payment_method'] ?? '') === 'maya' && ($r['json']['payment_reference'] ?? '') === $mayaRef, 'delivered sale copies Maya method and reference');
+
+    // (b) Cash on delivery needs no verification step.
+    $r = $customer->request('POST', '/api/my/orders', $prepaidOrder('cash', null));
+    expect($r, 201, 'customer places a COD order');
+    $codOnlyId = (int) ($r['json']['id'] ?? 0);
+    check(($r['json']['payment_status'] ?? '') === 'unpaid', 'COD order starts unpaid');
+    check(has_null_field(is_array($r['json']) ? $r['json'] : [], 'payment_reference'), 'COD order needs no reference');
+    $r = $owner->request('POST', '/api/orders/' . $codOnlyId . '/verify-payment', null, $northHeader);
+    expect($r, 409, 'verifying a COD order is not applicable');
+    check(($r['json']['code'] ?? '') === 'payment_not_required', 'COD verification returns payment_not_required');
+    $r = $owner->request('POST', '/api/orders/' . $codOnlyId . '/approve', null, $northHeader);
+    expect($r, 200, 'COD order approves without verification');
+    $r = $owner->request('POST', '/api/orders/' . $codOnlyId . '/deliver', [], $northHeader);
+    expect($r, 200, 'COD order delivers without verification');
+    $codOnlySaleId = (int) ($r['json']['sale_id'] ?? 0);
+    $r = $owner->request('GET', '/api/sales/' . $codOnlySaleId, null, $northHeader);
+    expect($r, 200, 'COD delivered sale reloads');
+    check(($r['json']['payment_method'] ?? '') === 'cash' && has_null_field(is_array($r['json']) ? $r['json'] : [], 'payment_reference'), 'COD sale records cash with no reference');
+
+    // (c) A GCash reference is unique across orders and sales.
+    $dupRef = 'GC-PHASE1-DUP-0003';
+    $r = $customer->request('POST', '/api/my/orders', $prepaidOrder('gcash', $dupRef));
+    expect($r, 201, 'first order reserves the GCash reference');
+    $r = $customer->request('POST', '/api/my/orders', $prepaidOrder('gcash', $dupRef));
+    expect($r, 409, 'second order with the same GCash reference is rejected');
+    check(($r['json']['code'] ?? '') === 'duplicate_reference', 'duplicate order reference returns duplicate_reference');
+    $r = $owner->request('POST', '/api/sales', [
+        'pay' => 'gcash',
+        'reference_no' => $dupRef,
+        'items' => [['size_id' => $size1, 'qty' => 1, 'back' => 0]],
+    ], ['X-Branch-Id: ' . $mainId]);
+    expect($r, 409, 'direct sale reusing an order reference is rejected');
+    check(($r['json']['code'] ?? '') === 'duplicate_reference', 'duplicate sale reference returns duplicate_reference');
+
+    $saleRef = 'MAYA-PHASE1-SALE-0004';
+    $r = $owner->request('POST', '/api/sales', [
+        'pay' => 'maya',
+        'reference_no' => $saleRef,
+        'items' => [['size_id' => $size1, 'qty' => 1, 'back' => 0]],
+    ], ['X-Branch-Id: ' . $mainId]);
+    expect($r, 201, 'direct sale accepts a fresh Maya reference with no customer');
+    check(has_null_field(is_array($r['json']) ? $r['json'] : [], 'customer_id'), 'prepaid direct sale does not require a customer');
+    check(($r['json']['payment_method'] ?? '') === 'maya' && ($r['json']['payment_reference'] ?? '') === $saleRef, 'direct sale records the Maya method and reference');
+
+    // (d) A rejected payment can be resubmitted with a fresh reference.
+    $rejectedRef = 'GC-PHASE1-REJECT-0005';
+    $freshRef = 'GC-PHASE1-FRESH-0006';
+    $r = $customer->request('POST', '/api/my/orders', $prepaidOrder('gcash', $rejectedRef));
+    expect($r, 201, 'customer places an order with a reference that will be rejected');
+    $resubmitId = (int) ($r['json']['id'] ?? 0);
+    $r = $owner->request('POST', '/api/orders/' . $resubmitId . '/reject-payment', ['reason' => 'Unreadable receipt'], $northHeader);
+    expect($r, 200, 'staff rejects the submitted payment');
+    check(($r['json']['payment_status'] ?? '') === 'rejected', 'reject-payment sets payment_status rejected');
+    $r = $customer->request('GET', '/api/my/orders/' . $resubmitId);
+    expect($r, 200, 'customer sees the rejected payment');
+    check(($r['json']['payment_status'] ?? '') === 'rejected', 'customer order shows rejected status');
+
+    $r = $customer->request('PATCH', '/api/my/orders/' . $resubmitId, $prepaidOrder('gcash', $freshRef));
+    expect($r, 200, 'customer resubmits with a fresh reference');
+    check(($r['json']['payment_status'] ?? '') === 'pending_verification', 'resubmission returns to pending_verification');
+    check(($r['json']['payment_reference'] ?? '') === $freshRef, 'resubmission stores the fresh reference');
+    check(has_null_field(is_array($r['json']) ? $r['json'] : [], 'payment_verified_by'), 'resubmission clears the previous verifier');
+    $r = $owner->request('POST', '/api/orders/' . $resubmitId . '/verify-payment', null, $northHeader);
+    expect($r, 200, 'staff verifies the resubmitted reference');
+    $r = $owner->request('POST', '/api/orders/' . $resubmitId . '/approve', null, $northHeader);
+    expect($r, 200, 'resubmitted order can be approved after verification');
 
     /* --------------------------------------------------------------------- */
     section('Login rate limiting and session isolation');
@@ -1617,6 +2003,8 @@ try {
     expect($r, 200, 'owner logs out');
     $r = $owner->request('GET', '/api/me');
     expect($r, 401, 'logged-out session is rejected');
+
+    check_migration_guard($root, $config);
 } finally {
     if ($managedServer !== null) {
         stop_server($managedServer);

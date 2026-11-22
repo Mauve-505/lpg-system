@@ -28,7 +28,12 @@ CREATE TABLE IF NOT EXISTS branches (
   latitude DECIMAL(10,7) NULL,
   longitude DECIMAL(10,7) NULL,
   contact_phone VARCHAR(40) NULL,
+  gcash_number VARCHAR(80) NULL,
+  gcash_account_name VARCHAR(100) NULL,
+  maya_number VARCHAR(80) NULL,
+  maya_account_name VARCHAR(100) NULL,
   service_area_notes VARCHAR(500) NULL,
+  service_area_cities TEXT NULL,
   operating_hours VARCHAR(200) NULL,
   cutoff_time TIME NULL,
   max_order_qty INT NOT NULL DEFAULT 20,
@@ -63,9 +68,6 @@ CREATE TABLE IF NOT EXISTS customers (
   postal_code VARCHAR(20) NULL,
   latitude DECIMAL(10,7) NULL,
   longitude DECIMAL(10,7) NULL,
-  credit_limit DECIMAL(10,2) NULL,
-  is_reseller TINYINT(1) NOT NULL DEFAULT 0,
-  reseller_status ENUM('none','pending','approved','rejected') NOT NULL DEFAULT 'none',
   is_active TINYINT(1) NOT NULL DEFAULT 1,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -88,7 +90,6 @@ CREATE TABLE IF NOT EXISTS users (
   customer_id INT NULL,
   branch_id INT NULL,
   phone VARCHAR(40) NULL,
-  phone_verified TINYINT(1) NOT NULL DEFAULT 0,
   must_change_password TINYINT(1) NOT NULL DEFAULT 0,
   session_version INT NOT NULL DEFAULT 1,
   is_active TINYINT(1) NOT NULL DEFAULT 1,
@@ -120,17 +121,6 @@ CREATE TABLE IF NOT EXISTS login_attempts (
   INDEX idx_attempts_user_time (username, action, created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
-CREATE TABLE IF NOT EXISTS password_resets (
-  id BIGINT AUTO_INCREMENT PRIMARY KEY,
-  user_id INT NOT NULL,
-  token_hash CHAR(64) NOT NULL,
-  expires_at DATETIME NOT NULL,
-  used_at DATETIME NULL,
-  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  INDEX idx_reset_token (token_hash),
-  CONSTRAINT fk_reset_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
 CREATE TABLE IF NOT EXISTS phone_verifications (
   id BIGINT AUTO_INCREMENT PRIMARY KEY,
   user_id INT NULL,
@@ -152,6 +142,7 @@ CREATE TABLE IF NOT EXISTS cylinder_sizes (
   id INT AUTO_INCREMENT PRIMARY KEY,
   label VARCHAR(30) NOT NULL UNIQUE,
   selling_price DECIMAL(10,2) NOT NULL DEFAULT 0,
+  deposit_amount DECIMAL(10,2) NOT NULL DEFAULT 0,
   valve_type ENUM('snap_on','pol','both','unspecified') NOT NULL DEFAULT 'unspecified',
   is_active TINYINT(1) NOT NULL DEFAULT 1,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -220,6 +211,7 @@ CREATE TABLE IF NOT EXISTS plant_deliveries (
   void_reason VARCHAR(200) NULL,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   INDEX idx_deliveries_branch_date (branch_id, delivery_date),
+  UNIQUE KEY uq_deliveries_branch_receipt (branch_id, receipt_no),
   CONSTRAINT fk_del_branch FOREIGN KEY (branch_id) REFERENCES branches(id) ON DELETE RESTRICT,
   CONSTRAINT fk_del_user FOREIGN KEY (received_by) REFERENCES users(id) ON DELETE RESTRICT,
   CONSTRAINT fk_del_void_user FOREIGN KEY (voided_by) REFERENCES users(id) ON DELETE SET NULL
@@ -241,7 +233,9 @@ CREATE TABLE IF NOT EXISTS sales (
   sale_no VARCHAR(30) NULL UNIQUE,
   sale_date DATE NOT NULL,
   customer_id INT NULL,
-  payment_type ENUM('cash','credit') NOT NULL,
+  payment_method ENUM('cash','gcash','maya') NOT NULL DEFAULT 'cash',
+  payment_reference VARCHAR(80) NULL,
+  idempotency_key VARCHAR(80) NULL UNIQUE,
   subtotal DECIMAL(12,2) NOT NULL DEFAULT 0,
   deposit_total DECIMAL(12,2) NOT NULL DEFAULT 0,
   is_rush TINYINT(1) NOT NULL DEFAULT 0,
@@ -258,6 +252,7 @@ CREATE TABLE IF NOT EXISTS sales (
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   INDEX idx_sales_branch_date (branch_id, sale_date),
   INDEX idx_sales_customer (customer_id),
+  INDEX idx_sales_payment_ref (payment_method, payment_reference),
   CONSTRAINT fk_sales_branch FOREIGN KEY (branch_id) REFERENCES branches(id) ON DELETE RESTRICT,
   CONSTRAINT fk_sales_customer FOREIGN KEY (customer_id) REFERENCES customers(id) ON DELETE SET NULL,
   CONSTRAINT fk_sales_user FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE RESTRICT,
@@ -331,7 +326,12 @@ CREATE TABLE IF NOT EXISTS orders (
   branch_id INT NOT NULL,
   order_no VARCHAR(30) NULL UNIQUE,
   customer_id INT NOT NULL,
-  payment_type ENUM('cash','credit') NOT NULL DEFAULT 'cash',
+  payment_method ENUM('cash','gcash','maya') NOT NULL DEFAULT 'cash',
+  payment_reference VARCHAR(80) NULL,
+  payment_status ENUM('unpaid','pending_verification','verified','rejected') NOT NULL DEFAULT 'unpaid',
+  payment_verified_by INT NULL,
+  payment_verified_at DATETIME NULL,
+  idempotency_key VARCHAR(80) NULL UNIQUE,
   notes VARCHAR(200) NULL,
   status ENUM('pending','approved','delivered','cancelled') NOT NULL DEFAULT 'pending',
   order_date DATE NOT NULL,
@@ -366,11 +366,13 @@ CREATE TABLE IF NOT EXISTS orders (
   qty INT NULL,
   INDEX idx_orders_branch_status (branch_id, status),
   INDEX idx_orders_customer (customer_id, created_at),
+  INDEX idx_orders_payment_ref (payment_method, payment_reference),
   CONSTRAINT fk_orders_branch FOREIGN KEY (branch_id) REFERENCES branches(id) ON DELETE RESTRICT,
   CONSTRAINT fk_orders_customer FOREIGN KEY (customer_id) REFERENCES customers(id) ON DELETE RESTRICT,
   CONSTRAINT fk_orders_sale FOREIGN KEY (sale_id) REFERENCES sales(id) ON DELETE SET NULL,
   CONSTRAINT fk_orders_rider FOREIGN KEY (rider_id) REFERENCES users(id) ON DELETE SET NULL,
-  CONSTRAINT fk_orders_created_by FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL
+  CONSTRAINT fk_orders_created_by FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL,
+  CONSTRAINT fk_orders_payment_verifier FOREIGN KEY (payment_verified_by) REFERENCES users(id) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS order_items (
@@ -383,6 +385,21 @@ CREATE TABLE IF NOT EXISTS order_items (
   line_total DECIMAL(12,2) NOT NULL DEFAULT 0,
   CONSTRAINT fk_oi_order FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE CASCADE,
   CONSTRAINT fk_oi_size FOREIGN KEY (size_id) REFERENCES cylinder_sizes(id) ON DELETE RESTRICT
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- A GCash/Maya reference may belong to only one order or sale. The unique key
+-- is deliberately shared across both tables so a reference cannot be recycled.
+CREATE TABLE IF NOT EXISTS payment_references (
+  method ENUM('gcash','maya') NOT NULL,
+  reference_no VARCHAR(80) NOT NULL,
+  order_id INT NULL,
+  sale_id INT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (method, reference_no),
+  UNIQUE KEY uq_payment_ref_order (order_id),
+  UNIQUE KEY uq_payment_ref_sale (sale_id),
+  CONSTRAINT fk_payment_ref_order FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE CASCADE,
+  CONSTRAINT fk_payment_ref_sale FOREIGN KEY (sale_id) REFERENCES sales(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ---------------------------------------------------------------------------
@@ -451,24 +468,6 @@ CREATE TABLE IF NOT EXISTS audit_log (
   CONSTRAINT fk_audit_branch FOREIGN KEY (branch_id) REFERENCES branches(id) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- Optional cylinder-level tracking (serial numbers / deposits).
-CREATE TABLE IF NOT EXISTS cylinder_assets (
-  id INT AUTO_INCREMENT PRIMARY KEY,
-  branch_id INT NOT NULL,
-  size_id INT NOT NULL,
-  serial_no VARCHAR(60) NOT NULL UNIQUE,
-  status ENUM('in_stock','with_customer','maintenance','retired') NOT NULL DEFAULT 'in_stock',
-  customer_id INT NULL,
-  deposit_amount DECIMAL(10,2) NOT NULL DEFAULT 0,
-  notes VARCHAR(200) NULL,
-  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  INDEX idx_assets_branch_status (branch_id, status),
-  CONSTRAINT fk_assets_branch FOREIGN KEY (branch_id) REFERENCES branches(id) ON DELETE RESTRICT,
-  CONSTRAINT fk_assets_size FOREIGN KEY (size_id) REFERENCES cylinder_sizes(id) ON DELETE RESTRICT,
-  CONSTRAINT fk_assets_customer FOREIGN KEY (customer_id) REFERENCES customers(id) ON DELETE SET NULL
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
 -- ---------------------------------------------------------------------------
 -- Default branch and starting catalogue.
 -- Prices here are PLACEHOLDERS carried over from the old prototype and must be
@@ -493,6 +492,10 @@ INSERT IGNORE INTO schema_migrations (version) VALUES ('001_fresh_install');
 INSERT IGNORE INTO schema_migrations (version) VALUES ('001_add_branches');
 INSERT IGNORE INTO schema_migrations (version) VALUES ('002_customer_home_branch');
 INSERT IGNORE INTO schema_migrations (version) VALUES ('003_structured_names_addresses_delivery');
+INSERT IGNORE INTO schema_migrations (version) VALUES ('004_rush_same_day_fee');
+INSERT IGNORE INTO schema_migrations (version) VALUES ('005_prepaid_payments');
+INSERT IGNORE INTO schema_migrations (version) VALUES ('006_operational_hardening');
+INSERT IGNORE INTO schema_migrations (version) VALUES ('007_hygiene');
 
 -- One lock row per branch+size so SELECT ... FOR UPDATE always finds a row.
 INSERT IGNORE INTO stock_locks (branch_id, size_id)

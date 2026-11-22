@@ -34,7 +34,11 @@ function order_payload(array $o): array
         'time_slot' => $o['time_slot'] ?? null,
         'delivery_address' => $o['delivery_address'] ?? null,
         'valve_type' => $o['valve_type'] ?? 'na',
-        'payment_type' => $o['payment_type'],
+        'payment_method' => $o['payment_method'],
+        'payment_reference' => $o['payment_reference'] ?? null,
+        'payment_status' => $o['payment_status'] ?? 'unpaid',
+        'payment_verified_by' => $o['payment_verified_by'] === null ? null : (int) $o['payment_verified_by'],
+        'payment_verified_at' => $o['payment_verified_at'] ?? null,
         'notes' => $o['notes'],
         'status' => $o['status'],
         'subtotal' => (float) $o['subtotal'],
@@ -148,11 +152,71 @@ function api_order_approve(array $params): void
         if ($o['status'] !== 'pending') {
             fail('Only pending orders can be approved.', 409, 'order_locked');
         }
+        require_verified_payment($o);
         q("UPDATE orders SET status='approved' WHERE id=?", [$orderId]);
         return (int) $o['branch_id'];
     });
     audit($u, 'approve', 'order', $orderId, ['status' => 'pending'], ['status' => 'approved'], $branchId);
     ok();
+}
+
+function api_order_verify_payment(array $params): void
+{
+    $u = require_staff_or_owner();
+    $orderId = (int) $params[0];
+    $branchId = tx(function () use ($orderId, $u) {
+        $o = row('SELECT * FROM orders WHERE id=? FOR UPDATE', [$orderId]);
+        if (!$o) {
+            fail('Order not found.', 404, 'not_found');
+        }
+        require_branch_access($u, (int) $o['branch_id'], true);
+        if (!in_array($o['payment_method'] ?? 'cash', ['gcash', 'maya'], true)) {
+            fail('This order does not need payment verification.', 409, 'payment_not_required');
+        }
+        if (($o['payment_status'] ?? 'unpaid') !== 'pending_verification') {
+            fail('Only a submitted reference can be verified.', 409, 'payment_not_submitted');
+        }
+        if (empty($o['payment_reference'])) {
+            fail('This order has no payment reference.', 409, 'payment_not_submitted');
+        }
+        q(
+            "UPDATE orders SET payment_status='verified', payment_verified_by=?, payment_verified_at=? WHERE id=?",
+            [(int) $u['id'], now_iso(), $orderId]
+        );
+        return (int) $o['branch_id'];
+    });
+    audit($u, 'verify_payment', 'order', $orderId, ['payment_status' => 'pending_verification'], ['payment_status' => 'verified'], $branchId);
+    ok(['payment_status' => 'verified']);
+}
+
+function api_order_reject_payment(array $params): void
+{
+    $u = require_staff_or_owner();
+    $orderId = (int) $params[0];
+    $reason = input_str('reason', 'Rejection reason', 3, 200, false);
+    $branchId = tx(function () use ($orderId, $u, $reason) {
+        $o = row('SELECT * FROM orders WHERE id=? FOR UPDATE', [$orderId]);
+        if (!$o) {
+            fail('Order not found.', 404, 'not_found');
+        }
+        require_branch_access($u, (int) $o['branch_id'], true);
+        if (!in_array($o['payment_method'] ?? 'cash', ['gcash', 'maya'], true)) {
+            fail('This order does not need payment verification.', 409, 'payment_not_required');
+        }
+        if (($o['payment_status'] ?? 'unpaid') !== 'pending_verification') {
+            fail('Only a submitted reference can be rejected.', 409, 'payment_not_submitted');
+        }
+        q(
+            "UPDATE orders SET payment_status='rejected', payment_verified_by=NULL, payment_verified_at=NULL WHERE id=?",
+            [$orderId]
+        );
+        return (int) $o['branch_id'];
+    });
+    audit($u, 'reject_payment', 'order', $orderId, ['payment_status' => 'pending_verification'], [
+        'payment_status' => 'rejected',
+        'reason' => $reason === '' ? null : $reason,
+    ], $branchId);
+    ok(['payment_status' => 'rejected']);
 }
 
 function api_order_cancel(array $params): void
@@ -266,6 +330,7 @@ function api_order_deliver(array $params): void
         if (!in_array($o['status'], ['pending', 'approved'], true)) {
             fail('Order cannot be delivered in its current state.', 409, 'order_locked');
         }
+        require_verified_payment($o);
         $items = rows('SELECT oi.*, z.label FROM order_items oi JOIN cylinder_sizes z ON z.id=oi.size_id WHERE oi.order_id=?', [$orderId]);
         if (!$items) {
             fail('Order has no items.', 409, 'empty_order');
@@ -311,11 +376,13 @@ function api_order_deliver(array $params): void
         $total = round($subtotal + $deposit + $rushFee + $outsideFee, 2);
 
         q(
-            'INSERT INTO sales (branch_id, sale_date, customer_id, payment_type, subtotal, deposit_total,
-                is_rush, rush_fee, is_outside_zone, outside_zone_fee, total_amount, order_id, created_by)
-             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
+            'INSERT INTO sales (branch_id, sale_date, customer_id, payment_method, payment_reference,
+                subtotal, deposit_total, is_rush, rush_fee, is_outside_zone, outside_zone_fee,
+                total_amount, order_id, created_by)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
             [
-                (int) $o['branch_id'], $date, (int) $o['customer_id'], $o['payment_type'], $subtotal, $deposit,
+                (int) $o['branch_id'], $date, (int) $o['customer_id'], $o['payment_method'],
+                $o['payment_reference'] ?? null, $subtotal, $deposit,
                 (int) ($o['is_rush'] ?? 0), $rushFee, (int) ($o['is_outside_zone'] ?? 0), $outsideFee,
                 $total, $orderId, (int) $u['id'],
             ]

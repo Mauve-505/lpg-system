@@ -58,7 +58,7 @@ function parse_order_items(): array
 }
 
 /** Price items for a branch and calculate totals. Caller must be in a transaction. */
-function price_order_items(int $branchId, array $items, string $paymentType, ?int $customerId, array $feeValues = []): array
+function price_order_items(int $branchId, array $items, array $feeValues = []): array
 {
     $subtotal = 0.0;
     $deposits = 0.0;
@@ -73,16 +73,6 @@ function price_order_items(int $branchId, array $items, string $paymentType, ?in
     $rushFee = money($feeValues['rush_fee'] ?? 0);
     $outsideFee = money($feeValues['outside_zone_fee'] ?? 0);
     $feeTotal = round($rushFee + $outsideFee, 2);
-
-    if ($paymentType === 'credit' && $customerId !== null) {
-        $cust = row('SELECT credit_limit FROM customers WHERE id=?', [$customerId]);
-        if ($cust && $cust['credit_limit'] !== null) {
-            $bal = customer_balance($customerId, $branchId);
-            if ($bal['balance'] + $subtotal + $deposits + $feeTotal > (float) $cust['credit_limit']) {
-                fail('This credit order would exceed the customer credit limit.', 409, 'credit_limit');
-            }
-        }
-    }
 
     return [
         'items' => $items,
@@ -103,23 +93,12 @@ function api_my_account(): void
     if (!$c) {
         fail('Customer account not found.', 404, 'not_found');
     }
-    $byBranch = customer_balances_by_branch((int) $u['customer_id']);
-    $total = ['balance' => 0.0, 'empties_owed' => 0];
-    foreach ($byBranch as $b) {
-        $total['balance'] += $b['balance'];
-        $total['empties_owed'] += $b['empties_owed'];
-    }
     json_response(array_merge([
         'id' => (int) $c['id'],
         'name' => $c['name'],
         'contact' => $c['contact'],
         'address' => $c['address'],
-        'credit_limit' => $c['credit_limit'] === null ? null : (float) $c['credit_limit'],
-        'is_reseller' => (int) $c['is_reseller'],
-        'reseller_status' => $c['reseller_status'],
-        'balance' => round($total['balance'], 2),
-        'empties_owed' => $total['empties_owed'],
-        'by_branch' => $byBranch,
+        'empties_owed' => customer_empties_owed((int) $u['customer_id']),
     ], person_name_payload($c), address_payload($c)));
 }
 
@@ -171,7 +150,8 @@ function api_my_orders_create(): void
         fail('This branch accepts at most ' . (int) $branch['max_order_qty'] . ' cylinders per order.', 422, 'order_limit');
     }
 
-    $payment = input_enum('pay', 'Payment type', ['cash', 'credit']);
+    [$payment, $paymentReference] = payment_input();
+    $paymentStatus = $payment === 'cash' ? 'unpaid' : 'pending_verification';
     $notes = input_str('notes', 'Notes', 0, 200, false);
     $requested = input_date('requested_date', 'Requested delivery date', false) ?: today();
     $timeSlot = input_str('time_slot', 'Time slot', 0, 40, false);
@@ -214,17 +194,18 @@ function api_my_orders_create(): void
         }
     }
 
-    $orderId = tx(function () use ($u, $branchId, $items, $payment, $notes, $requested, $timeSlot, $delivery, $valve, $fees) {
-        $priced = price_order_items((int) $branchId, $items, (string) $payment, (int) $u['customer_id'], $fees);
+    $orderId = tx(function () use ($u, $branchId, $items, $payment, $paymentReference, $paymentStatus, $notes, $requested, $timeSlot, $delivery, $valve, $fees) {
+        $priced = price_order_items((int) $branchId, $items, $fees);
         q(
-            'INSERT INTO orders (branch_id, customer_id, payment_type, notes, status, order_date, requested_date,
+            'INSERT INTO orders (branch_id, customer_id, payment_method, payment_reference, payment_status, notes, status, order_date, requested_date,
                 time_slot, delivery_address, delivery_street, delivery_barangay, delivery_city, delivery_province,
                 delivery_region, delivery_postal_code, delivery_latitude, delivery_longitude, valve_type,
                 is_rush, rush_fee, is_outside_zone, outside_zone_fee,
                 subtotal, deposit_total, total_amount, created_by, size_id, qty)
-             VALUES (?,?,?,?,"pending",?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+             VALUES (?,?,?,?,?,?,"pending",?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
             [
-                (int) $branchId, (int) $u['customer_id'], $payment, $notes === '' ? null : $notes, today(),
+                (int) $branchId, (int) $u['customer_id'], $payment, $paymentReference, $paymentStatus,
+                $notes === '' ? null : $notes, today(),
                 $requested, $timeSlot === '' ? null : $timeSlot, $delivery['address'], $delivery['street'],
                 $delivery['barangay'], $delivery['city'], $delivery['province'], $delivery['region'],
                 $delivery['postal_code'], $delivery['latitude'], $delivery['longitude'], $valve,
@@ -234,6 +215,7 @@ function api_my_orders_create(): void
             ]
         );
         $id = (int) db()->lastInsertId();
+        reserve_payment_reference((string) $payment, $paymentReference, $id, null);
         foreach ($priced['items'] as $it) {
             q(
                 'INSERT INTO order_items (order_id, size_id, qty, unit_price, deposit_amount, line_total) VALUES (?,?,?,?,?,?)',
@@ -262,7 +244,11 @@ function api_my_order_update(array $params): void
         if ($o['status'] !== 'pending') {
             fail('Only pending orders can be edited.', 409, 'order_locked');
         }
-        $old = ['payment_type' => $o['payment_type'], 'notes' => $o['notes'], 'total_amount' => (float) $o['total_amount']];
+        $old = [
+            'payment_method' => $o['payment_method'],
+            'notes' => $o['notes'],
+            'total_amount' => (float) $o['total_amount'],
+        ];
 
         $branchId = (int) (body_value('branch_id') ?? $o['branch_id']);
         $branch = require_active_branch($branchId);
@@ -271,7 +257,18 @@ function api_my_order_update(array $params): void
         if ($totalQty > (int) $branch['max_order_qty']) {
             fail('This branch accepts at most ' . (int) $branch['max_order_qty'] . ' cylinders per order.', 422, 'order_limit');
         }
-        $payment = body_value('pay') !== null ? input_enum('pay', 'Payment type', ['cash', 'credit']) : $o['payment_type'];
+        $payment = (string) $o['payment_method'];
+        $paymentReference = $o['payment_reference'] === null ? null : (string) $o['payment_reference'];
+        $paymentStatus = (string) $o['payment_status'];
+        if (body_has('pay')) {
+            [$payment, $paymentReference] = payment_input();
+            $paymentStatus = $payment === 'cash' ? 'unpaid' : 'pending_verification';
+        } elseif ($payment !== 'cash' && body_has('reference_no')) {
+            $paymentReference = input_str('reference_no', 'Reference number', 4, 80, true, '/^[A-Za-z0-9][A-Za-z0-9._:-]*$/');
+            $paymentStatus = 'pending_verification';
+        } elseif ($payment !== 'cash' && $paymentReference === null) {
+            fail('A reference number is required for this payment method.', 422, 'validation_error', ['field' => 'reference_no']);
+        }
         $notes = body_value('notes') !== null ? input_str('notes', 'Notes', 0, 200, false) : (string) ($o['notes'] ?? '');
         $requested = body_value('requested_date') !== null ? input_date('requested_date', 'Requested delivery date') : ($o['requested_date'] ?: today());
         $timeSlot = body_value('time_slot') !== null ? input_str('time_slot', 'Time slot', 0, 40, false) : (string) ($o['time_slot'] ?? '');
@@ -298,8 +295,14 @@ function api_my_order_update(array $params): void
         if ($requested < today()) {
             fail('Requested delivery date cannot be in the past.', 422, 'validation_error', ['field' => 'requested_date']);
         }
+        if (!$isRush && $requested === today() && !empty($branch['cutoff_time'])) {
+            $cutoff = substr((string) $branch['cutoff_time'], 0, 5);
+            if ((new DateTimeImmutable('now'))->format('H:i') > $cutoff) {
+                fail('Same-day orders for this branch closed at ' . $cutoff . '. Choose a later date.', 409, 'cutoff_passed');
+            }
+        }
 
-        $priced = price_order_items($branchId, $items, (string) $payment, (int) $u['customer_id'], $fees);
+        $priced = price_order_items($branchId, $items, $fees);
         q('DELETE FROM order_items WHERE order_id=?', [$orderId]);
         foreach ($priced['items'] as $it) {
             q(
@@ -308,13 +311,14 @@ function api_my_order_update(array $params): void
             );
         }
         q(
-            'UPDATE orders SET branch_id=?, payment_type=?, notes=?, requested_date=?, time_slot=?,
+            'UPDATE orders SET branch_id=?, payment_method=?, payment_reference=?, payment_status=?, notes=?, requested_date=?, time_slot=?,
                 delivery_address=?, delivery_street=?, delivery_barangay=?, delivery_city=?, delivery_province=?,
                 delivery_region=?, delivery_postal_code=?, delivery_latitude=?, delivery_longitude=?,
                 valve_type=?, is_rush=?, rush_fee=?, is_outside_zone=?, outside_zone_fee=?,
                 subtotal=?, deposit_total=?, total_amount=?, size_id=?, qty=? WHERE id=?',
             [
-                $branchId, $payment, $notes === '' ? null : $notes, $requested, $timeSlot === '' ? null : $timeSlot,
+                $branchId, $payment, $paymentReference, $paymentStatus,
+                $notes === '' ? null : $notes, $requested, $timeSlot === '' ? null : $timeSlot,
                 $delivery['address'], $delivery['street'], $delivery['barangay'], $delivery['city'],
                 $delivery['province'], $delivery['region'], $delivery['postal_code'], $delivery['latitude'],
                 $delivery['longitude'], $valve, $priced['is_rush'], $priced['rush_fee'], $priced['is_outside_zone'],
@@ -322,7 +326,12 @@ function api_my_order_update(array $params): void
                 $priced['items'][0]['size_id'], $totalQty, $orderId,
             ]
         );
-        return ['old' => $old, 'new' => ['payment_type' => $payment, 'total_amount' => $priced['total_amount']], 'branch_id' => $branchId];
+        replace_order_payment_reference($orderId, (string) $payment, $paymentReference);
+        return [
+            'old' => $old,
+            'new' => ['payment_method' => $payment, 'total_amount' => $priced['total_amount']],
+            'branch_id' => $branchId,
+        ];
     });
 
     audit($u, 'update', 'order', $orderId, $changed['old'], $changed['new'], $changed['branch_id']);
@@ -349,20 +358,3 @@ function api_my_order_cancel(array $params): void
     ok();
 }
 
-function api_my_payments(): void
-{
-    $u = require_customer();
-    $p = pagination();
-    $where = 'p.customer_id=?';
-    $params = [(int) $u['customer_id']];
-    $total = (int) val('SELECT COUNT(*) FROM payments p WHERE ' . $where, $params, 0);
-    $st = db()->prepare(
-        'SELECT p.id, p.payment_no, p.payment_date, p.amount, p.method, p.reference_no, p.is_void, b.name branch_name
-         FROM payments p JOIN branches b ON b.id=p.branch_id
-         WHERE ' . $where . ' ORDER BY p.id DESC LIMIT ? OFFSET ?'
-    );
-    bind_page($st, $params, $p['per'], $p['offset']);
-    $st->execute();
-    paginate_headers($total, $p['page'], $p['per']);
-    json_response($st->fetchAll());
-}

@@ -27,9 +27,10 @@ No Node.js is required at runtime. Node is only needed to build the frontend.
 - **Owner** — all branches, branch switcher, prices, staff, reports, transfers,
   audit trail, stock adjustments.
 - **Staff** — exactly one branch, assigned by the owner. The branch is always
-  read from the database; a client-supplied branch header is ignored.
+  read from the database; a client-supplied branch header is ignored. Staff
+  verify submitted GCash/Maya payment references for their own branch.
 - **Customer** — public signup, order from any active branch, see order history,
-  balance, payments and empties owed.
+  payment status and empties owed.
 
 ## Features
 
@@ -43,27 +44,35 @@ No Node.js is required at runtime. Node is only needed to build the frontend.
 - Signup and login; forced password change for owner-created accounts.
 - Multi-item orders with branch, cylinder size, quantity, date, time slot,
   delivery address, valve type, notes and deposit.
-- Pending-order editing and cancellation; per-branch quantity limits and cutoff.
+- Prepaid payment choice: cash on delivery (no reference needed) or GCash/Maya
+  with a 4–80 character reference number that staff must verify.
+- Pending-order editing (including resubmitting a rejected reference) and
+  cancellation; per-branch quantity limits and cutoff.
 - Locked order prices: later branch price changes do not rewrite past orders.
-- Account view: balance, payments, empties owed.
+- Account view: profile, order history with payment status, and empties owed.
 
 ### Staff / owner operations
 - Dashboard with branch-aware totals.
-- Multi-item sales; cash or credit; deposit handling; receipts.
+- Multi-item direct sales with cash/GCash/Maya, optional customer, deposit
+  handling and receipts.
 - Plant deliveries and stock adjustments; all stock is ledger-backed.
-- Customer payments with balance validation and void/reversal.
-- Order approval, rider assignment and delivery (creates a sale).
+- Manual payment verification: verify or reject a submitted GCash/Maya order
+  reference, with audit trail; duplicate references are rejected across orders
+  and sales.
+- Order approval, rider assignment and delivery (creates a sale); GCash/Maya
+  orders cannot be approved or delivered until verified.
 - Inter-branch transfers: request → approve → ship → receive, with idempotency.
 - Void/reversal instead of hard deletes for financial and stock records.
-- Per-branch price lists.
-- Reports: daily, sales register, unpaid balances, empties, stock and branch
-  comparison. Every report supports `?format=csv` (UTF-8 BOM).
+- Per-branch price lists, cylinder deposits and branch GCash/Maya account
+  details.
+- Reports: daily, sales register (filter by payment method), empties, stock and
+  branch comparison. Every report supports `?format=csv` (UTF-8 BOM).
 - Owner audit trail and user administration, including assisted password reset.
 
 ### Multi-branch model
 - Branch-specific selling prices; global prices are a fallback.
 - Customer records have an optional home branch; staff can manage only
-  customers linked to their branch by home branch or a transaction.
+  customers linked to their branch by home branch, sale or order.
 - Stock is tracked per branch and per cylinder size.
 - Staff belong to exactly one branch.
 - The owner reads either one branch (`X-Branch-Id: <id>`) or all branches
@@ -136,8 +145,12 @@ C:\xampp\php\php.exe database\seed.php
 Migration `001_add_branches` assigns all existing rows to **Main Branch**
 (`MAIN`) so historical totals do not change. Migration
 `002_customer_home_branch` adds an optional customer home branch and backfills
-it from each customer's earliest sale, order or payment. See
-[docs/deployment.md](docs/deployment.md) for rollback steps.
+it from each customer's earliest sale or order. Migration
+`005_prepaid_payments` removes the credit/reseller fields, adds payment-method
+and verification fields, and **refuses to run while any non-void legacy credit
+sale still has an outstanding amount** — settle those first. Migrations 006 and
+007 belong to later phases; their behaviour is out of scope for this release.
+See [docs/deployment.md](docs/deployment.md) for rollback steps.
 
 ## Tests
 
@@ -206,17 +219,22 @@ where possible.
   Permissions policies.
 - Stock writes use transactions plus `SELECT ... FOR UPDATE` row locks; negative
   stock is rejected. Financial records are voided/reversed, not deleted.
+- Payment verification is branch-scoped: staff/owner verify or reject GCash/Maya
+  order references in their branch, and duplicate references across orders and
+  sales are rejected. The legacy payments table is read-only history.
 - Customer records are branch-scoped for staff: they can list, edit and
-  deactivate only home-branch customers or customers with a transaction in their
-  branch. Only the owner can reassign a customer's home branch.
-- Audit trail for privileged and financial actions (best-effort after commit).
+  deactivate only home-branch customers or customers with a sale or order in
+  their branch. Only the owner can reassign a customer's home branch.
+- Audit trail for privileged and financial actions, including
+  `verify_payment`/`reject_payment` (best-effort after commit).
 
 See [docs/security.md](docs/security.md) for the full control list, known gaps
 and operating procedures.
 
 ## Before going public
 
-1. Replace all placeholder prices, cylinder sizes, branch details and max order
+1. Replace all placeholder prices, cylinder deposits, branch details (including
+   GCash/Maya account numbers and names and service-area cities) and max order
    quantities with real values.
 2. Confirm written authorization for any third-party brand or logo, or keep the
    generic `LPG Distributor` branding.

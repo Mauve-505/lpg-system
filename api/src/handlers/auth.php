@@ -210,8 +210,9 @@ function api_change_password(): void
 function api_branches_public(): void
 {
     $rows = rows(
-        'SELECT id, name, code, address, contact_phone, service_area_notes, operating_hours,
-                rush_fee, outside_zone_fee
+        'SELECT id, name, code, address, contact_phone, gcash_number, gcash_account_name,
+                maya_number, maya_account_name, service_area_notes, service_area_cities,
+                operating_hours, rush_fee, outside_zone_fee
          FROM branches WHERE is_active=1 ORDER BY name'
     );
     json_response(array_map(static function ($b) {
