@@ -189,7 +189,7 @@ delivery times, certifications, or “cleaner” fuel claims.
 ## 7. Publishing and versioning
 
 1. Lawyer returns reviewed text.
-2. Update `frontend/src/site/Privacy.jsx` and `Terms.jsx` with the approved
+2. Update `FRONTEND/src/site/Privacy.jsx` and `Terms.jsx` with the approved
    text, or move the content to a CMS/document store.
 3. Set `VITE_LEGAL_VERSION` and `VITE_LEGAL_EFFECTIVE`.
 4. Remove or replace the “Review required before launch” flag only after

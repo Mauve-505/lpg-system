@@ -2,7 +2,43 @@
 
 All notable changes to this project are recorded here.
 
-## Unreleased / Phase 2 — Operational hardening
+## Unreleased / Phase 3 — Hygiene and deployment safety
+
+### Added
+
+- Config-driven session save path: `session.save_path` / `LPG_SESSION_SAVE_PATH`.
+  An empty value uses `<system temp>/lpg_sessions`, outside the web root. Keep
+  the directory outside the web root and writable only by PHP. PHP's built-in
+  session GC is probabilistic and may not run on low-traffic sites; configure
+  `session.gc_*` settings or a cron cleanup for expired session files.
+- Hardened root `.htaccess`: blocks dotfiles, `FRONTEND/`, `legacy/`,
+  `node_modules`, `database/`, `tests/`, `docs/` and dangerous extensions.
+
+### Changed
+
+- Session storage now honours the configured save path instead of a hard-coded
+  location; the default remains `<system temp>/lpg_sessions`.
+- OTP codes are no longer logged in plaintext. Codes are hashed in the database
+  and delivery is reserved for a future SMS provider.
+- Documentation uses `FRONTEND/` consistently for the live React source.
+
+### Removed
+
+- The duplicate legacy Express backend in `BACKEND/`. `legacy/node-backend/`
+  remains as a historical reference copy and is blocked from HTTP access.
+- Password-reset helper functions, `users.phone_verified`, `password_resets`
+  and `cylinder_assets` (migration `007_hygiene`). Password resets remain
+  owner-assisted temporary passwords.
+- The obsolete test shim.
+
+### Migration
+
+- Migration `007_hygiene` is now applied and removes the schema/code items
+  listed above.
+
+> This section supersedes older notes that described `BACKEND/` as retained.
+
+## Phase 2 — Operational hardening
 
 ### Added
 

@@ -11,7 +11,7 @@ Phase 1; `resolved` means a decision was made and implemented.
 
 | # | Item | Current state | Decision needed | Where it changes |
 |---|------|---------------|-----------------|------------------|
-| 1 | Brand name and logo | Generic `LPG Distributor` / `Your Company Name` | Confirm the real brand and whether a third-party mark is authorised in writing. Do not use PETRONAS branding without permission. | `frontend/.env.*`, `frontend/src/site/content.js` |
+| 1 | Brand name and logo | Generic `LPG Distributor` / `Your Company Name` | Confirm the real brand and whether a third-party mark is authorised in writing. Do not use PETRONAS branding without permission. | `FRONTEND/.env.*`, `FRONTEND/src/site/content.js` |
 | 2 | Registered business name | Placeholder | Provide the exact legal name and entity type. | `VITE_COMPANY_NAME`, Privacy/Terms |
 | 3 | Public contact details | Empty; hidden in the UI | Provide phone, email, address, hours and monitored privacy email. | `VITE_CONTACT_*`, `VITE_PRIVACY_CONTACT` |
 | 4 | Branch list | One placeholder `Main Branch (MAIN)` | Provide every real branch: name, code, address, phone, hours, cutoff, service area, max order qty, active date. | **Branches** page |
@@ -91,10 +91,10 @@ Phase 1; `resolved` means a decision was made and implemented.
 | 60 | Subdirectory install | Not supported by default | Deploy at the root, or change Vite `base` and the API base, then rebuild. |
 | 61 | Browser support | Modern evergreen browsers | Confirm any requirement for older Android/iOS browsers. |
 | 62 | Accessibility | Basic skip links, labels and focus styles | Commission a WCAG 2.1 AA audit before launch. |
-| 63 | Filipino language | Lightweight UI/chrome translation (`frontend/src/i18n.js`) | Decide whether full marketing/legal translation is needed. |
+| 63 | Filipino language | Lightweight UI/chrome translation (`FRONTEND/src/i18n.js`) | Decide whether full marketing/legal translation is needed. |
 | 64 | Tausug or other local language | Not implemented | Confirm whether required for the target service area. |
 | 65 | Timezone | `Asia/Manila`, MySQL `+08:00` | Confirm no branch operates in another timezone. |
-| 66 | Legacy folders | `FRONTEND/`, `BACKEND/`, `legacy/node-backend/` retained | They were locked by a process during the port. Remove them from the deployment artifact once verified; never serve them. |
+| 66 | Legacy folders | `BACKEND/` removed; `FRONTEND/` is the live source; `legacy/node-backend/` retained as a historical reference and blocked by `.htaccess` | Do not deploy the legacy copy; never serve it over HTTP. Use `FRONTEND/` in all paths and commands. |
 | 67 | Test data | `lpg_test` is disposable | Never point tests at production; the runner drops the configured test database. |
 | 68 | Database name | `lpg_db` | Some hosts require a prefixed name; update schema/config together. |
 | 69 | Shared customer records | Home branch plus sale/order-based staff access; contact and address fields are global | Confirm whether a customer may be shared across branches, and who may edit or deactivate a shared record. |

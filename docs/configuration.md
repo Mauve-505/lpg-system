@@ -37,9 +37,10 @@ variable the API looks for `api/config.php`.
 | `db.mysqldump_path` | `LPG_MYSQLDUMP_PATH` | empty | Optional absolute path to `mysqldump` for `database/migrate.php`. |
 | `session.name` | `LPG_SESSION_NAME` | `lpg_session` | Cookie name. |
 | `session.lifetime` | `LPG_SESSION_LIFETIME` | `7200` | Idle lifetime in seconds; also the absolute cap is `4 ×` this value. |
+| `session.save_path` | `LPG_SESSION_SAVE_PATH` | empty | Session file directory; empty = `<system temp>/lpg_sessions`, outside the web root. |
 | `session.secure` | `LPG_SESSION_SECURE` | `null` | `null` = auto (Secure on HTTPS). Force `true` behind a TLS-terminating proxy. |
 | `session.samesite` | `LPG_SESSION_SAMESITE` | `Lax` | Cookie SameSite value. |
-| `session_secret` | `LPG_SESSION_SECRET` | empty | Server-side secret used for OTP and password-reset token hashes. **Set a unique random value.** |
+| `session_secret` | `LPG_SESSION_SECRET` | empty | Server-side secret used for OTP code hashes. **Set a unique random value.** |
 | `security.csrf` | — | `true` | Keep enabled. Disables CSRF checks only if explicitly set false. |
 | `security.password_min_length` | — | `8` | Minimum password length. Raise for stronger policy. |
 | `security.login_max_attempts` | — | `5` | Failed logins per username+IP inside the window. |
@@ -71,10 +72,10 @@ C:\xampp\php\php.exe -r "echo bin2hex(random_bytes(32)), PHP_EOL;"
 - codes are 6 digits, hashed with SHA-256 + `session_secret`, single use and
   time-limited;
 - verification attempts are counted;
-- `send_otp()` currently logs the code to `api/logs/error.log` when no provider
-  is configured;
-- if `otp.provider` is set, `send_otp()` throws until a real SMS gateway is
-  implemented.
+- plaintext codes are never written to logs; delivery is reserved for a future
+  SMS provider;
+- no provider is configured yet, so `otp.provider` must stay empty until a real
+  SMS gateway is implemented.
 
 When `otp.provider` is empty, signup does **not** require an OTP. This is the
 current default. Do not enable OTP in production until a provider is wired in
@@ -82,10 +83,15 @@ and tested.
 
 ### Session storage
 
-Sessions use PHP's native file handler in
-`<system temp>/lpg_sessions` (created with mode `0700`). This keeps session
-files outside the web root. On a multi-server deployment, use a shared session
-store or sticky sessions; otherwise a user can be logged out when routed to a
+Sessions use PHP's native file handler. The directory is set by
+`session.save_path` / `LPG_SESSION_SAVE_PATH`; when empty it defaults to
+`<system temp>/lpg_sessions` (created with mode `0700`), outside the web root.
+Keep the configured directory outside the web root and writable only by PHP.
+
+PHP's built-in session GC is probabilistic and may not run on a low-traffic
+site. Configure `session.gc_*` settings or an external cron job to clean up
+expired session files. On a multi-server deployment, use a shared session store
+or sticky sessions; otherwise a user can be logged out when routed to a
 different node.
 
 ### Database values, not configuration
@@ -107,7 +113,7 @@ credential to configure; verification is done by branch staff.
 ## Frontend build settings
 
 Frontend values are compiled into the production bundle by Vite. Put them in
-`frontend/.env.local`, `frontend/.env.production`, or the build environment,
+`FRONTEND/.env.local`, `FRONTEND/.env.production`, or the build environment,
 then rebuild.
 
 | Variable | Default | Purpose |
@@ -129,7 +135,7 @@ then rebuild.
 | `VITE_LEGAL_EFFECTIVE` | `To be set before launch` | Legal effective date. |
 | `VITE_API_PROXY` | `http://localhost` | Dev-server proxy target only; not used in production. |
 
-Local development example (`frontend/.env.local`):
+Local development example (`FRONTEND/.env.local`):
 
 ```dotenv
 VITE_API_PROXY=http://127.0.0.1:8080
@@ -145,8 +151,9 @@ Do not put secret values in `VITE_*` variables. Everything prefixed with
 
 The repository ships two `.htaccess` files:
 
-- root `.htaccess` — SPA fallback, security headers, blocks `database/`,
-  `legacy/`, `tests/`, `docs/` and dangerous file extensions;
+- root `.htaccess` — SPA fallback, security headers, blocks dotfiles,
+  `FRONTEND/`, `legacy/`, `node_modules`, `database/`, `tests/`, `docs/` and
+  dangerous file extensions;
 - `api/.htaccess` — routes all `/api/*` to `api/index.php`, blocks `src/`,
   `logs/`, `config*.php` and dotfiles.
 

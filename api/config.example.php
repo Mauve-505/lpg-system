@@ -24,6 +24,11 @@ return [
             ? null
             : filter_var(getenv('LPG_SESSION_SECURE'), FILTER_VALIDATE_BOOLEAN),
         'samesite' => getenv('LPG_SESSION_SAMESITE') ?: 'Lax',
+        // Empty falls back to <system temp>/lpg_sessions. Keep this directory
+        // outside the web root and writable only by PHP. PHP's built-in session
+        // GC is probabilistic and may not run on low-traffic sites, so configure
+        // session.gc_probability / GC via cron or your platform's mechanism.
+        'save_path' => getenv('LPG_SESSION_SAVE_PATH') ?: '',
     ],
 
     // Generate with: php -r "echo bin2hex(random_bytes(32));"

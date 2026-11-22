@@ -21,8 +21,10 @@ DirectoryIndex index.html
   # API is handled by api/.htaccess.
   RewriteRule ^api/ - [L]
 
-  # Never expose source, database dumps, backups or tests.
-  RewriteRule ^(database|legacy|tests|docs)(/|$) - [F,L]
+  # Never expose dotfiles, source/build folders, database dumps or tests.
+  # NC matters on case-insensitive filesystems such as NTFS.
+  RewriteRule (^|/)\. - [F,L]
+  RewriteRule ^(FRONTEND|node_modules|database|legacy|tests|docs)(/|$) - [NC,F,L]
 
   # Real files and directories (the built assets, images, robots.txt) win.
   RewriteCond %{REQUEST_FILENAME} -f [OR]

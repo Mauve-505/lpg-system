@@ -41,7 +41,9 @@ patched.
   blocked from all endpoints except `/api/me`, `/api/me/password`,
   `/api/logout`, `/api/csrf` and `/api/health` until they change it.
 - Owner-assisted reset generates a random one-time temporary password, sets
-  `must_change_password=1` and bumps `session_version`.
+  `must_change_password=1` and bumps `session_version`. Password-reset helper
+  functions, `users.phone_verified`, `password_resets` and `cylinder_assets`
+  were removed by migration `007_hygiene`; resets remain owner-assisted.
 
 ### Login
 - Username lookup is prepared and parameterised.
@@ -76,8 +78,9 @@ patched.
 
 ## 3. Sessions
 
-- Native PHP file sessions, stored in `<system temp>/lpg_sessions`, outside the
-  web root.
+- Native PHP file sessions. The directory comes from `session.save_path`
+  (`LPG_SESSION_SAVE_PATH`); an empty value uses `<system temp>/lpg_sessions`,
+  outside the web root.
 - `session.use_strict_mode=1`, `use_only_cookies=1`, HttpOnly cookies.
 - `SameSite=Lax` by default; configurable.
 - `Secure` automatically on HTTPS, or forced with `session.secure=true` behind
@@ -92,6 +95,11 @@ patched.
   customer record or bumping `session_version` invalidates access immediately.
 - Password changes bump `session_version`, which invalidates every other
   session for that user.
+
+**Session GC:** PHP's built-in session garbage collection is probabilistic and
+may not run on a low-traffic site. Configure `session.gc_*` settings or a cron
+job to clean up expired session files. Keep the directory outside the web root
+and writable only by the PHP process.
 
 **Limitation:** file sessions are local to one server. Multiple app servers
 need shared session storage or sticky sessions.
@@ -246,6 +254,8 @@ data isolation.
   `X-Forwarded-For` is ignored unless the direct peer matches
   `security.trusted_proxies` (exact IPs or CIDRs), so an attacker cannot spoof
   rate-limit identity by adding a header.
+- OTP codes are never logged in plaintext; they are hashed in the database and
+  delivery is reserved for a future SMS provider.
 - CSV exports prefix spreadsheet-formula-leading cells (`=`, `+`, `-`, `@`,
   tab, carriage return) with an apostrophe.
 - Audit writes are best-effort **after** the business transaction commits. If
@@ -256,15 +266,18 @@ data isolation.
 
 ## 10. File and deployment exposure
 
-The root `.htaccess` blocks `database/`, `legacy/`, `tests/`, `docs/` and
-dangerous extensions (`.sql`, `.log`, `.md`, `.env`, `.ini`, `.bak`, `.dump`).
-The API `.htaccess` blocks `api/src/`, `api/logs/`, `api/config*.php` and
-dotfiles. `Options -Indexes` is set.
+The root `.htaccess` blocks dotfiles, `FRONTEND/`, `legacy/`, `node_modules`,
+`database/`, `tests/`, `docs/` and dangerous extensions (`.sql`, `.log`, `.md`,
+`.env`, `.ini`, `.bak`, `.dump`). The API `.htaccess` blocks `api/src/`,
+`api/logs/`, `api/config*.php` and dotfiles. `Options -Indexes` is set.
 
 If the host ignores `.htaccess`, these rules do not apply. Reproduce them in
 the VirtualHost and verify with direct requests:
 
 ```
+/.htaccess
+/FRONTEND/vite.config.js
+/node_modules/
 /database/schema.sql
 /tests/config.test.php
 /docs/unverified-decisions.md
@@ -281,7 +294,8 @@ All should return `403` or `404`, never the file contents.
   order and sale history, GCash/Maya payment references, verification actor and
   timestamp, and empties owed.
 - Access is role- and branch-scoped; customers only see their own records.
-- Passwords are hashed; OTP and reset tokens are hashed with a server secret.
+- Passwords are hashed; OTP codes are hashed with a server secret. There are no
+  stored password-reset tokens.
 - The audit trail records who changed what and when.
 - Data is not encrypted at rest by the application. Use full-disk/volume
   encryption and encrypted backups at the infrastructure level.

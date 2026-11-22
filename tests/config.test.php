@@ -17,6 +17,7 @@ return [
         'lifetime' => 7200,
         'secure' => false,
         'samesite' => 'Lax',
+        'save_path' => '',
     ],
     'session_secret' => 'test-secret-not-for-production',
     'security' => [

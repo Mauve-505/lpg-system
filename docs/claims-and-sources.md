@@ -106,7 +106,7 @@ To use a third-party brand:
 1. Obtain written authorisation covering the exact mark, logo files, colours,
    territory, channels and duration.
 2. Keep the signed approval on file.
-3. Add the approved asset and update `frontend/src/site/content.js` or the
+3. Add the approved asset and update `FRONTEND/src/site/content.js` or the
    `VITE_*` build variables.
 4. Confirm the site does not imply endorsement, certification or affiliation
    beyond what was authorised.

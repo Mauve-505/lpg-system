@@ -253,26 +253,6 @@ function reset_database(string $root, array $db): PDO
     return $pdo;
 }
 
-/**
- * Test-harness compatibility shim.
- *
- * database/schema.sql currently omits `users.phone_verified`, but
- * api/src/auth.php:152 still selects that column when loading a session.
- * Restore it in the disposable test database only so the rest of the suite can
- * run; no application or schema file is changed (see the final report).
- */
-function ensure_schema_compatibility(PDO $pdo): void
-{
-    $st = $pdo->prepare(
-        "SELECT COUNT(*) FROM information_schema.COLUMNS
-         WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='users' AND COLUMN_NAME='phone_verified'"
-    );
-    $st->execute();
-    if ((int) $st->fetchColumn() === 0) {
-        $pdo->exec('ALTER TABLE users ADD COLUMN phone_verified TINYINT(1) NOT NULL DEFAULT 0');
-    }
-}
-
 function seed_owner(PDO $pdo): void
 {
     $st = $pdo->prepare(
@@ -506,7 +486,6 @@ function check_migration_guard(string $root, array $config): void
 
 echo "Resetting {$testDb} from database/schema.sql ...\n";
 $pdo = reset_database($root, $db);
-ensure_schema_compatibility($pdo);
 seed_owner($pdo);
 
 $mainId = (int) $pdo->query("SELECT id FROM branches WHERE code='MAIN' LIMIT 1")->fetchColumn();

@@ -25,7 +25,10 @@ function start_session(): void
     $sameSite = (string) config('session.samesite', 'Lax');
 
     // Session files live outside the web root and survive Apache restarts.
-    $savePath = rtrim(sys_get_temp_dir(), DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . 'lpg_sessions';
+    $configuredSavePath = config('session.save_path', '');
+    $savePath = is_string($configuredSavePath) && $configuredSavePath !== ''
+        ? $configuredSavePath
+        : rtrim(sys_get_temp_dir(), DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . 'lpg_sessions';
     if (!is_dir($savePath)) {
         @mkdir($savePath, 0700, true);
     }
@@ -149,7 +152,7 @@ function current_user(bool $refresh = false): ?array
     $u = row(
         'SELECT u.id, u.name, u.first_name, u.middle_name, u.last_name, u.name_suffix,
                 u.username, u.role, u.customer_id, u.branch_id,
-                u.phone_verified, u.must_change_password, u.session_version, u.is_active,
+                u.must_change_password, u.session_version, u.is_active,
                 b.name AS branch_name, b.is_active AS branch_active,
                 c.name AS customer_name, c.is_active AS customer_active,
                 c.contact AS customer_contact, c.address AS customer_address
@@ -190,7 +193,6 @@ function current_user(bool $refresh = false): ?array
     $u['customer_id'] = $u['customer_id'] === null ? null : (int) $u['customer_id'];
     $u['branch_id'] = $u['branch_id'] === null ? null : (int) $u['branch_id'];
     $u['must_change_password'] = (int) $u['must_change_password'];
-    $u['phone_verified'] = (int) $u['phone_verified'];
     $u['session_version'] = (int) $u['session_version'];
     $cached = $u;
     return $cached;
@@ -498,46 +500,20 @@ function public_user(array $u): array
         'customer_id' => $u['customer_id'],
         'branch_id' => $u['branch_id'],
         'branch_name' => $u['branch_name'] ?? null,
-        'phone_verified' => (int) ($u['phone_verified'] ?? 0),
         'must_change_password' => (int) ($u['must_change_password'] ?? 0),
         'csrf_token' => csrf_token(),
     ];
 }
 
 /* ------------------------------------------------------------------------- */
-/* Password reset / phone verification design                                */
+/* Phone verification                                                        */
 /* ------------------------------------------------------------------------- */
-
-function create_password_reset_token(int $userId): string
-{
-    $token = bin2hex(random_bytes(32));
-    $hash = hash('sha256', $token . (string) config('session_secret', ''));
-    q(
-        'INSERT INTO password_resets (user_id, token_hash, expires_at) VALUES (?,?,?)',
-        [$userId, $hash, (new DateTimeImmutable('now'))->modify('+60 minutes')->format('Y-m-d H:i:s')]
-    );
-    return $token;
-}
-
-function consume_password_reset_token(string $token): ?int
-{
-    $hash = hash('sha256', $token . (string) config('session_secret', ''));
-    $r = row(
-        'SELECT id, user_id FROM password_resets WHERE token_hash=? AND used_at IS NULL AND expires_at>=?',
-        [$hash, now_iso()]
-    );
-    if (!$r) {
-        return null;
-    }
-    q('UPDATE password_resets SET used_at=? WHERE id=?', [now_iso(), (int) $r['id']]);
-    return (int) $r['user_id'];
-}
 
 /**
  * OTP design: codes are stored as SHA-256 hashes with the app secret, expire,
  * and are single-use. A real SMS provider should be wired into send_otp().
- * When no provider is configured the code is written to the error log only
- * (never returned by the API) so local testing is possible.
+ * With no provider configured, a redacted dev notice is logged; the code is
+ * never returned by the API or written to logs.
  */
 function create_otp(?int $userId, string $phone, string $purpose = 'signup'): string
 {
@@ -555,7 +531,7 @@ function send_otp(string $phone, string $code, string $purpose): void
 {
     $provider = (string) config('otp.provider', '');
     if ($provider === '') {
-        error_log('[OTP:dev] phone=' . $phone . ' purpose=' . $purpose . ' code=' . $code);
+        error_log('[OTP:dev] phone=' . $phone . ' purpose=' . $purpose . ' code withheld (no SMS provider configured)');
         return;
     }
     // Integrate an SMS gateway here. Never hardcode credentials; read them

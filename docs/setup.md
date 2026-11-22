@@ -57,7 +57,7 @@ Apache, then open <http://lpg.local/>.
 If this project is the only site, you can make it XAMPP's `htdocs` content
 (for example by setting `DocumentRoot "C:/xampp/htdocs"` and putting the files
 there). Do not install it at `http://localhost/lpg-system/` without adjusting
-`base` in `frontend/vite.config.js` and the API base in `frontend/src/api.js`.
+`base` in `FRONTEND/vite.config.js` and the API base in `FRONTEND/src/api.js`.
 
 ### Option C — PHP built-in server (local preview only)
 
@@ -129,18 +129,18 @@ Demo data is only for local testing.
 ## 5. Build the frontend
 
 ```powershell
-cd frontend
+cd FRONTEND
 npm install
 npm run build
 cd ..
 ```
 
 The build writes `index.html`, `assets/index-*.js` and `assets/index-*.css` to
-the project root. `emptyOutDir` is disabled in `frontend/vite.config.js` so the
+the project root. `emptyOutDir` is disabled in `FRONTEND/vite.config.js` so the
 build cannot delete `api/`, `database/` or other server folders.
 
 Optional branding/contact values are read at build time. Create
-`frontend/.env.local` (or set the variables in the build environment):
+`FRONTEND/.env.local` (or set the variables in the build environment):
 
 ```dotenv
 VITE_BRAND_NAME=LPG Distributor
@@ -216,7 +216,7 @@ When `TEST_BASE_URL` is set, point it at a server using
 The Vite dev server proxies `/api` to the PHP backend:
 
 ```powershell
-cd frontend
+cd FRONTEND
 npm run dev
 ```
 
@@ -257,7 +257,8 @@ What the migration does:
   service areas and per-branch delivery receipt uniqueness) and
   `008_transfer_receiving` (actual received quantities and shortage notes).
 - Marks each applied migration so it will not run twice. Migration `007_hygiene`
-  belongs to the final cleanup phase.
+  is applied in Phase 3 and removes password-reset helpers,
+  `users.phone_verified`, `password_resets` and `cylinder_assets`.
 
 `migrate.php` writes a `mysqldump` backup to `database/backups/` before
 applying anything. If `mysqldump` is not on `PATH`, set `db.mysqldump_path` in
@@ -276,7 +277,7 @@ applying anything. If `mysqldump` is not on `PATH`, set `db.mysqldump_path` in
 | Staff cannot find a customer | Staff see only customers whose home branch is theirs or who have a sale/order in their branch. The owner can reassign the home branch. |
 | Page is blank after build | Assets are referenced from `/assets`; deploy at the site root, or set Vite `base` and rebuild. |
 | `npm install` / build fails on Vite | Use the pinned `@vitejs/plugin-react` 6.x with Vite 8.x. Do not downgrade only one of them. |
-| Session lost on every request | The system temp directory (`lpg_sessions`) is not writable, or a reverse proxy is stripping cookies. |
+| Session lost on every request | Check `session.save_path` / `LPG_SESSION_SAVE_PATH`; the configured directory (default `<system temp>/lpg_sessions`) must exist and be writable by PHP. A reverse proxy may also be stripping cookies. |
 | Times are eight hours off | Keep PHP `timezone` at `Asia/Manila`; the PDO connection sets MySQL to `+08:00`. |
 | CSV opens with odd characters in Excel | The export includes a UTF-8 BOM; use Data → From Text if Excel still guesses the encoding. |
 | Tests cannot create `lpg_test` | Grant the test DB user `CREATE`/`DROP`; edit `tests/config.test.php`. |

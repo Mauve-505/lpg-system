@@ -15,8 +15,9 @@ must be served over **HTTPS** in production.
 - [ ] Database user limited to `SELECT, INSERT, UPDATE, DELETE` on the app
       database (plus the rights needed during migration).
 - [ ] HTTPS certificate installed; HTTP redirects to HTTPS.
-- [ ] `database/`, `tests/`, `docs/`, `legacy/`, `FRONTEND/`, `BACKEND/`,
-      `api/src/`, `api/logs/` and `api/config.php` not reachable over HTTP.
+- [ ] Dotfiles, `FRONTEND/`, `legacy/`, `node_modules`, `database/`, `tests/`,
+      `docs/`, `api/src/`, `api/logs/` and `api/config.php` not reachable over
+      HTTP; dangerous extensions denied.
 - [ ] Backups configured and a restore has been tested.
 - [ ] Log rotation and monitoring configured.
 - [ ] Placeholder data and demo accounts removed or replaced.
@@ -58,9 +59,12 @@ chmod 750 /var/www/lpg/api/logs /var/www/lpg/database/backups
 Windows/XAMPP: ensure the Apache service account can read the files and write
 to the system temp directory, `api/logs/` and `database/backups/`.
 
-Sessions are written to `<system temp>/lpg_sessions` with mode `0700`. On
-shared hosting, confirm PHP's `sys_get_temp_dir()` is writable and not shared
-with untrusted users.
+Session files go to `session.save_path` / `LPG_SESSION_SAVE_PATH`; an empty
+value defaults to `<system temp>/lpg_sessions` (mode `0700`). Keep that directory
+outside the web root and writable only by PHP. PHP's built-in session GC is
+probabilistic and may not run on low-traffic sites; configure `session.gc_*`
+settings or a cron cleanup for expired session files. On shared hosting, confirm
+the path is writable and not shared with untrusted users.
 
 ## 3. Database
 
@@ -116,7 +120,9 @@ refused with a clear message and no statements are applied. Settle those
 amounts first, then run `migrate.php` again. The legacy payments table is left
 intact as read-only history. Migration `006_operational_hardening` adds
 idempotency and receipt-uniqueness schema, and `008_transfer_receiving` adds
-shortage tracking. Migration `007_hygiene` belongs to the final cleanup phase.
+shortage tracking. Migration `007_hygiene` is applied in Phase 3 and removes
+password-reset helpers, `users.phone_verified`, `password_resets` and
+`cylinder_assets`.
 
 DDL auto-commits in MySQL. If a migration fails halfway, **restore the backup**
 rather than re-running the file.
@@ -169,7 +175,7 @@ Notes:
   host root.
 - `AllowOverride All` is required for the shipped `.htaccess` files.
 - If `.htaccess` is disabled, copy its rules into the VirtualHost and block
-  `database|legacy|tests|docs` explicitly.
+  `dotfiles|FRONTEND|legacy|node_modules|database|tests|docs` explicitly.
 - The API sends HSTS only when it detects HTTPS. Ensure your proxy forwards
   `HTTPS=on` (or `SERVER_PORT=443`). Alternatively add HSTS at the web server.
 - **Nginx is not supported out of the box.** `.htaccess` is ignored there. You
@@ -231,7 +237,7 @@ HSTS at the web server. Do not enable HSTS on a domain you cannot keep on HTTPS.
 On a build machine or CI:
 
 ```bash
-cd frontend
+cd FRONTEND
 npm ci
 npm run build
 ```
@@ -305,8 +311,9 @@ Run these against the real HTTPS host:
 9. Create, approve, ship and receive a transfer.
 10. Export a CSV report and open it in a spreadsheet.
 11. Deactivate a test staff account and confirm the session ends.
-12. Confirm `database/`, `tests/`, `docs/`, `legacy/`, `api/src/` and
-    `api/config.php` are not downloadable.
+12. Confirm dotfiles, `FRONTEND/`, `node_modules`, `database/`, `tests/`,
+    `docs/`, `legacy/`, `api/src/` and `api/config.php` are not downloadable,
+    `BACKEND/` is absent, and dangerous extensions are denied.
 13. Confirm the privacy contact and legal version/effective date are real.
 
 ## 11. Incident basics
