@@ -58,7 +58,7 @@ function parse_order_items(): array
 }
 
 /** Price items for a branch and calculate totals. Caller must be in a transaction. */
-function price_order_items(int $branchId, array $items, string $paymentType, ?int $customerId): array
+function price_order_items(int $branchId, array $items, string $paymentType, ?int $customerId, array $feeValues = []): array
 {
     $subtotal = 0.0;
     $deposits = 0.0;
@@ -70,11 +70,15 @@ function price_order_items(int $branchId, array $items, string $paymentType, ?in
     }
     unset($it);
 
+    $rushFee = money($feeValues['rush_fee'] ?? 0);
+    $outsideFee = money($feeValues['outside_zone_fee'] ?? 0);
+    $feeTotal = round($rushFee + $outsideFee, 2);
+
     if ($paymentType === 'credit' && $customerId !== null) {
         $cust = row('SELECT credit_limit FROM customers WHERE id=?', [$customerId]);
         if ($cust && $cust['credit_limit'] !== null) {
             $bal = customer_balance($customerId, $branchId);
-            if ($bal['balance'] + $subtotal + $deposits > (float) $cust['credit_limit']) {
+            if ($bal['balance'] + $subtotal + $deposits + $feeTotal > (float) $cust['credit_limit']) {
                 fail('This credit order would exceed the customer credit limit.', 409, 'credit_limit');
             }
         }
@@ -84,14 +88,18 @@ function price_order_items(int $branchId, array $items, string $paymentType, ?in
         'items' => $items,
         'subtotal' => round($subtotal, 2),
         'deposit_total' => round($deposits, 2),
-        'total_amount' => round($subtotal + $deposits, 2),
+        'is_rush' => $feeValues['is_rush'] ?? 0,
+        'rush_fee' => $rushFee,
+        'is_outside_zone' => $feeValues['is_outside_zone'] ?? 0,
+        'outside_zone_fee' => $outsideFee,
+        'total_amount' => round($subtotal + $deposits + $feeTotal, 2),
     ];
 }
 
 function api_my_account(): void
 {
     $u = require_customer();
-    $c = row('SELECT id, name, contact, address, credit_limit, is_reseller, reseller_status FROM customers WHERE id=?', [(int) $u['customer_id']]);
+    $c = row('SELECT * FROM customers WHERE id=?', [(int) $u['customer_id']]);
     if (!$c) {
         fail('Customer account not found.', 404, 'not_found');
     }
@@ -101,7 +109,7 @@ function api_my_account(): void
         $total['balance'] += $b['balance'];
         $total['empties_owed'] += $b['empties_owed'];
     }
-    json_response([
+    json_response(array_merge([
         'id' => (int) $c['id'],
         'name' => $c['name'],
         'contact' => $c['contact'],
@@ -112,7 +120,7 @@ function api_my_account(): void
         'balance' => round($total['balance'], 2),
         'empties_owed' => $total['empties_owed'],
         'by_branch' => $byBranch,
-    ]);
+    ], person_name_payload($c), address_payload($c)));
 }
 
 function api_my_orders_list(): void
@@ -130,7 +138,8 @@ function api_my_orders_list(): void
     }
     $total = (int) val('SELECT COUNT(*) FROM orders o WHERE ' . $where, $params, 0);
     $st = db()->prepare(
-        'SELECT o.*, b.name branch_name FROM orders o JOIN branches b ON b.id=o.branch_id
+        'SELECT o.*, b.name branch_name, r.name rider_name FROM orders o JOIN branches b ON b.id=o.branch_id
+         LEFT JOIN users r ON r.id=o.rider_id
          WHERE ' . $where . ' ORDER BY o.id DESC LIMIT ? OFFSET ?'
     );
     bind_page($st, $params, $p['per'], $p['offset']);
@@ -143,7 +152,7 @@ function api_my_orders_list(): void
 function api_my_order_show(array $params): void
 {
     $u = require_customer();
-    $o = row('SELECT o.*, b.name branch_name FROM orders o JOIN branches b ON b.id=o.branch_id WHERE o.id=? AND o.customer_id=?', [$params[0], (int) $u['customer_id']]);
+    $o = row('SELECT o.*, b.name branch_name, r.name rider_name FROM orders o JOIN branches b ON b.id=o.branch_id LEFT JOIN users r ON r.id=o.rider_id WHERE o.id=? AND o.customer_id=?', [$params[0], (int) $u['customer_id']]);
     if (!$o) {
         fail('Order not found.', 404, 'not_found');
     }
@@ -166,32 +175,60 @@ function api_my_orders_create(): void
     $notes = input_str('notes', 'Notes', 0, 200, false);
     $requested = input_date('requested_date', 'Requested delivery date', false) ?: today();
     $timeSlot = input_str('time_slot', 'Time slot', 0, 40, false);
-    $address = input_str('delivery_address', 'Delivery address', 3, 200, false);
-    if ($address === '') {
-        $address = (string) val('SELECT address FROM customers WHERE id=?', [(int) $u['customer_id']], '');
+    $cust = row(
+        'SELECT address, street, barangay, city, province, region, postal_code, latitude, longitude
+         FROM customers WHERE id=?',
+        [(int) $u['customer_id']]
+    ) ?: [];
+    $delivery = address_input('delivery_', 'Delivery address', false);
+    if (!$delivery['provided']) {
+        // No structured address chosen: reuse the customer's saved address so
+        // existing accounts keep their delivery location and map pin.
+        if ($delivery['street'] === null && $delivery['barangay'] === null) {
+            foreach (['street', 'barangay', 'city', 'province', 'region', 'postal_code', 'latitude', 'longitude'] as $k) {
+                $delivery[$k] = $cust[$k] ?? null;
+            }
+        }
+        if ($delivery['address'] === null) {
+            $delivery['address'] = $cust['address'] ?? null;
+        }
     }
+    $isRush = input_bool('is_rush', false);
+    $isOutside = input_bool('is_outside_zone', false);
+    $fees = order_fee_values($branch, $isRush, $isOutside);
     $valve = input_enum('valve_type', 'Valve type', ['snap_on', 'pol', 'na'], false) ?: 'na';
 
+    // Rush is a same-day service: the requested date is always today and the
+    // branch cut-off does not apply to it.
+    if ($isRush) {
+        $requested = today();
+    }
     if ($requested < today()) {
         fail('Requested delivery date cannot be in the past.', 422, 'validation_error', ['field' => 'requested_date']);
     }
     // Same-day cutoff (owner-configurable per branch).
-    if ($requested === today() && !empty($branch['cutoff_time'])) {
+    if (!$isRush && $requested === today() && !empty($branch['cutoff_time'])) {
         $cutoff = substr((string) $branch['cutoff_time'], 0, 5);
         if ((new DateTimeImmutable('now'))->format('H:i') > $cutoff) {
             fail('Same-day orders for this branch closed at ' . $cutoff . '. Choose a later date.', 409, 'cutoff_passed');
         }
     }
 
-    $orderId = tx(function () use ($u, $branchId, $items, $payment, $notes, $requested, $timeSlot, $address, $valve) {
-        $priced = price_order_items((int) $branchId, $items, (string) $payment, (int) $u['customer_id']);
+    $orderId = tx(function () use ($u, $branchId, $items, $payment, $notes, $requested, $timeSlot, $delivery, $valve, $fees) {
+        $priced = price_order_items((int) $branchId, $items, (string) $payment, (int) $u['customer_id'], $fees);
         q(
             'INSERT INTO orders (branch_id, customer_id, payment_type, notes, status, order_date, requested_date,
-                time_slot, delivery_address, valve_type, subtotal, deposit_total, total_amount, created_by, size_id, qty)
-             VALUES (?,?,?,?,"pending",?,?,?,?,?,?,?,?,?,?,?)',
+                time_slot, delivery_address, delivery_street, delivery_barangay, delivery_city, delivery_province,
+                delivery_region, delivery_postal_code, delivery_latitude, delivery_longitude, valve_type,
+                is_rush, rush_fee, is_outside_zone, outside_zone_fee,
+                subtotal, deposit_total, total_amount, created_by, size_id, qty)
+             VALUES (?,?,?,?,"pending",?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
             [
                 (int) $branchId, (int) $u['customer_id'], $payment, $notes === '' ? null : $notes, today(),
-                $requested, $timeSlot === '' ? null : $timeSlot, $address === '' ? null : $address, $valve,
+                $requested, $timeSlot === '' ? null : $timeSlot, $delivery['address'], $delivery['street'],
+                $delivery['barangay'], $delivery['city'], $delivery['province'], $delivery['region'],
+                $delivery['postal_code'], $delivery['latitude'], $delivery['longitude'], $valve,
+                $priced['is_rush'], $priced['rush_fee'], $priced['is_outside_zone'], $priced['outside_zone_fee'],
                 $priced['subtotal'], $priced['deposit_total'], $priced['total_amount'], (int) $u['id'],
                 $priced['items'][0]['size_id'], array_sum(array_column($priced['items'], 'qty')),
             ]
@@ -207,7 +244,7 @@ function api_my_orders_create(): void
         return $id;
     });
 
-    $o = row('SELECT o.*, b.name branch_name FROM orders o JOIN branches b ON b.id=o.branch_id WHERE o.id=?', [$orderId]);
+    $o = row('SELECT o.*, b.name branch_name, r.name rider_name FROM orders o JOIN branches b ON b.id=o.branch_id LEFT JOIN users r ON r.id=o.rider_id WHERE o.id=?', [$orderId]);
     audit($u, 'create', 'order', $orderId, null, ['status' => 'pending', 'total_amount' => $o['total_amount'], 'branch_id' => (int) $branchId], (int) $branchId);
     json_response(order_payload($o), 201);
 }
@@ -238,14 +275,31 @@ function api_my_order_update(array $params): void
         $notes = body_value('notes') !== null ? input_str('notes', 'Notes', 0, 200, false) : (string) ($o['notes'] ?? '');
         $requested = body_value('requested_date') !== null ? input_date('requested_date', 'Requested delivery date') : ($o['requested_date'] ?: today());
         $timeSlot = body_value('time_slot') !== null ? input_str('time_slot', 'Time slot', 0, 40, false) : (string) ($o['time_slot'] ?? '');
-        $address = body_value('delivery_address') !== null ? input_str('delivery_address', 'Delivery address', 3, 200, false) : (string) ($o['delivery_address'] ?? '');
+        if (address_provided('delivery_')) {
+            $delivery = address_input('delivery_', 'Delivery address', false);
+        } else {
+            $delivery = [
+                'address' => $o['delivery_address'], 'street' => $o['delivery_street'],
+                'barangay' => $o['delivery_barangay'], 'city' => $o['delivery_city'],
+                'province' => $o['delivery_province'], 'region' => $o['delivery_region'],
+                'postal_code' => $o['delivery_postal_code'], 'latitude' => $o['delivery_latitude'],
+                'longitude' => $o['delivery_longitude'],
+            ];
+        }
+        $isRush = body_has('is_rush') ? input_bool('is_rush', false) : ((int) $o['is_rush'] === 1);
+        $isOutside = body_has('is_outside_zone') ? input_bool('is_outside_zone', false) : ((int) $o['is_outside_zone'] === 1);
+        $fees = order_fee_values($branch, $isRush, $isOutside);
         $valve = body_value('valve_type') !== null ? input_enum('valve_type', 'Valve type', ['snap_on', 'pol', 'na']) : $o['valve_type'];
 
+        // A rush order always stays on today's schedule.
+        if ($isRush) {
+            $requested = today();
+        }
         if ($requested < today()) {
             fail('Requested delivery date cannot be in the past.', 422, 'validation_error', ['field' => 'requested_date']);
         }
 
-        $priced = price_order_items($branchId, $items, (string) $payment, (int) $u['customer_id']);
+        $priced = price_order_items($branchId, $items, (string) $payment, (int) $u['customer_id'], $fees);
         q('DELETE FROM order_items WHERE order_id=?', [$orderId]);
         foreach ($priced['items'] as $it) {
             q(
@@ -255,19 +309,24 @@ function api_my_order_update(array $params): void
         }
         q(
             'UPDATE orders SET branch_id=?, payment_type=?, notes=?, requested_date=?, time_slot=?,
-                delivery_address=?, valve_type=?, subtotal=?, deposit_total=?, total_amount=?,
-                size_id=?, qty=? WHERE id=?',
+                delivery_address=?, delivery_street=?, delivery_barangay=?, delivery_city=?, delivery_province=?,
+                delivery_region=?, delivery_postal_code=?, delivery_latitude=?, delivery_longitude=?,
+                valve_type=?, is_rush=?, rush_fee=?, is_outside_zone=?, outside_zone_fee=?,
+                subtotal=?, deposit_total=?, total_amount=?, size_id=?, qty=? WHERE id=?',
             [
                 $branchId, $payment, $notes === '' ? null : $notes, $requested, $timeSlot === '' ? null : $timeSlot,
-                $address === '' ? null : $address, $valve, $priced['subtotal'], $priced['deposit_total'],
-                $priced['total_amount'], $priced['items'][0]['size_id'], $totalQty, $orderId,
+                $delivery['address'], $delivery['street'], $delivery['barangay'], $delivery['city'],
+                $delivery['province'], $delivery['region'], $delivery['postal_code'], $delivery['latitude'],
+                $delivery['longitude'], $valve, $priced['is_rush'], $priced['rush_fee'], $priced['is_outside_zone'],
+                $priced['outside_zone_fee'], $priced['subtotal'], $priced['deposit_total'], $priced['total_amount'],
+                $priced['items'][0]['size_id'], $totalQty, $orderId,
             ]
         );
         return ['old' => $old, 'new' => ['payment_type' => $payment, 'total_amount' => $priced['total_amount']], 'branch_id' => $branchId];
     });
 
     audit($u, 'update', 'order', $orderId, $changed['old'], $changed['new'], $changed['branch_id']);
-    $o = row('SELECT o.*, b.name branch_name FROM orders o JOIN branches b ON b.id=o.branch_id WHERE o.id=?', [$orderId]);
+    $o = row('SELECT o.*, b.name branch_name, r.name rider_name FROM orders o JOIN branches b ON b.id=o.branch_id LEFT JOIN users r ON r.id=o.rider_id WHERE o.id=?', [$orderId]);
     json_response(order_payload($o));
 }
 

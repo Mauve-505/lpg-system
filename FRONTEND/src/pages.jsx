@@ -1,14 +1,15 @@
 import { useState } from 'react'
 import { downloadCsv, query } from './api'
 import {
-  Badge, FilterBar, Loader, ErrorState, PageHeader, Pagination, Stat, Table,
+  Badge, FilterBar, Loader, ErrorState, MapLink, PageHeader, Pagination, Stat, Table,
   Acts, formatDate, formatDateTime, itemsQty, itemsSummary, monthStart, num, peso, today,
   useApi, useApp, usePagedApi,
 } from './ui'
 import {
-  AdjustForm, BranchForm, ConfirmDelete, ConfirmPost, CustomerForm, DeliverForm, DeliveryForm,
-  OrderForm, PaymentForm, PriceForm, ReasonPostForm, ReceiptModal, ResetPasswordForm, SaleForm,
-  SizeForm, TransferForm, UserForm, useVoid,
+  AdjustForm, AssignRiderForm, BranchAdminForm, BranchForm, BranchTeamModal, ConfirmDelete,
+  ConfirmPost, CustomerForm, DeliverForm, DeliveryForm, OrderForm, PaymentForm, PriceForm,
+  ReasonPostForm, ReceiptModal, ResetPasswordForm, SaleForm, SizeForm, TeamMemberForm,
+  TransferForm, UserForm, useVoid,
 } from './forms'
 
 const dateFmt = formatDate
@@ -181,6 +182,7 @@ export function Orders() {
   const [modal, setModal] = useState(null)
   const list = usePagedApi('orders' + query({ status, from, to, q }), { deps: [status, from, to, q] })
   const showBranch = branchColumn(me, activeBranch)
+  const canManage = me?.role !== 'delivery'
 
   const reset = () => { setStatus(''); setFrom(''); setTo(''); setQ('') }
   const close = () => setModal(null)
@@ -204,7 +206,7 @@ export function Orders() {
       <Table
         head={[
           'Date', 'Order no.', ...(showBranch ? ['Branch'] : []), 'Customer', 'Items',
-          { t: 'Total', r: true }, 'Requested', 'Payment', 'Status', 'Actions',
+          { t: 'Total', r: true }, 'Requested', 'Payment', 'Rider', 'Status', 'Actions',
         ]}
         loading={list.loading}
         error={list.error}
@@ -218,20 +220,29 @@ export function Orders() {
             <td><b>{o.customer}</b>{o.customer_contact ? <small className="sub">{o.customer_contact}</small> : null}</td>
             <td className="wrap">
               {itemsSummary(o.items)}
+              {Number(o.is_rush) === 1 ? <small className="sub">Rush · +{peso(o.rush_fee)}</small> : null}
+              {Number(o.is_outside_zone) === 1 ? <small className="sub">Outside delivery zone · +{peso(o.outside_zone_fee)}</small> : null}
               {o.delivery_address ? <small className="sub">{o.delivery_address}</small> : null}
+              <MapLink lat={o.delivery_latitude} lng={o.delivery_longitude} title={'Delivery location · ' + o.customer} />
             </td>
             <td className="r">{peso(o.total_amount)}</td>
             <td>{dateFmt(o.requested_date)}{o.time_slot ? <small className="sub">{o.time_slot}</small> : null}</td>
             <td><Badge t={o.payment_type} /></td>
+            <td>{o.rider_name || '—'}</td>
             <td><Badge t={o.status} /></td>
             <Acts>
-              {o.status === 'pending' && (
+              {canManage && o.status === 'pending' && (
                 <button className="sm link-ac" onClick={() => setModal({ type: 'approve', order: o })}>Approve</button>
+              )}
+              {['pending', 'approved'].includes(o.status) && (
+                <button className="sm link-ac" onClick={() => setModal({ type: 'assign', order: o })}>Assign</button>
               )}
               {['pending', 'approved'].includes(o.status) && (
                 <>
                   <button className="sm link-ac" onClick={() => setModal({ type: 'deliver', order: o })}>Deliver</button>
-                  <button className="sm link-danger" onClick={() => setModal({ type: 'cancel', order: o })}>Cancel</button>
+                  {canManage && (
+                    <button className="sm link-danger" onClick={() => setModal({ type: 'cancel', order: o })}>Cancel</button>
+                  )}
                 </>
               )}
             </Acts>
@@ -261,6 +272,7 @@ export function Orders() {
           onClose={close}
         />
       )}
+      {modal?.type === 'assign' && <AssignRiderForm order={modal.order} onClose={close} />}
       {modal?.type === 'deliver' && <DeliverForm order={modal.order} onClose={close} />}
     </>
   )
@@ -501,7 +513,7 @@ export function Customers() {
           <tr key={c.id} className={Number(c.is_active) === 0 ? 'row-void' : undefined}>
             <td><b>{c.name}</b>{c.username ? <small className="sub">@{c.username}</small> : null}</td>
             <td>{c.contact || '—'}</td>
-            <td>{c.address || '—'}</td>
+            <td>{c.address || '—'}<MapLink lat={c.latitude} lng={c.longitude} title={'Customer location · ' + c.name} /></td>
             <td className="r">{c.credit_limit === null ? 'No limit' : peso(c.credit_limit)}</td>
             <td className={'r ' + (Number(c.balance) > 0 ? 'neg' : '')}>{peso(c.balance)}</td>
             <td className={'r ' + (Number(c.empties_owed) > 0 ? 'warn' : '')}>{num(c.empties_owed)}</td>
@@ -999,12 +1011,13 @@ export function Branches() {
 
       <p className="scope-note">
         Active branches appear on the public website and can receive customer orders.
-        A branch with stock, active staff, open work or open transfers cannot be deactivated.
+        A branch with stock, active team members, open work or open transfers cannot be deactivated.
       </p>
 
       <Table
-        head={['Branch', 'Code', 'Contact', 'Hours', 'Cut-off', { t: 'Max / order', r: true },
-          { t: 'Active staff', r: true }, { t: 'Open orders', r: true }, { t: 'Open transfers', r: true },
+        head={['Branch', 'Code', 'Admin', 'Contact', 'Hours', 'Cut-off',
+          { t: 'Fees', r: true }, { t: 'Max / order', r: true },
+          { t: 'Active team', r: true }, { t: 'Open orders', r: true }, { t: 'Open transfers', r: true },
           { t: 'Full stock', r: true }, { t: 'Sold today', r: true }, 'Status', 'Actions']}
         loading={list.loading}
         error={list.error}
@@ -1014,9 +1027,15 @@ export function Branches() {
           <tr key={b.id} className={Number(b.is_active) === 0 ? 'row-void' : undefined}>
             <td><b>{b.name}</b>{b.address ? <small className="sub">{b.address}</small> : null}</td>
             <td className="mono">{b.code}</td>
+            <td>{b.branch_admin?.name || <span className="muted">Not assigned</span>}</td>
             <td>{b.contact_phone || '—'}</td>
             <td>{b.operating_hours || '—'}</td>
             <td>{b.cutoff_time || '—'}</td>
+            <td className="r">
+              {Number(b.rush_fee) > 0 ? <small className="sub">Rush {peso(b.rush_fee)}</small> : null}
+              {Number(b.outside_zone_fee) > 0 ? <small className="sub">Outside {peso(b.outside_zone_fee)}</small> : null}
+              {!(Number(b.rush_fee) > 0) && !(Number(b.outside_zone_fee) > 0) ? 'Free' : null}
+            </td>
             <td className="r">{b.max_order_qty}</td>
             <td className="r">{b.staff_count}</td>
             <td className="r">{b.open_orders}</td>
@@ -1026,6 +1045,8 @@ export function Branches() {
             <td>{Number(b.is_active) === 1 ? <Badge t="active" /> : <Badge t="inactive" />}</td>
             <Acts>
               <button className="sm link-ac" onClick={() => setModal({ type: 'edit', branch: b })}>Edit</button>
+              <button className="sm link-ac" onClick={() => setModal({ type: 'team', branch: b })}>Team</button>
+              <button className="sm link-ac" onClick={() => setModal({ type: 'admin', branch: b })}>Admin</button>
               {Number(b.is_active) === 1 && (
                 <>
                   <button className="sm link-ac" onClick={() => setModal({ type: 'prices', branch: b })}>Prices</button>
@@ -1043,6 +1064,8 @@ export function Branches() {
       {modal?.type === 'add' && <BranchForm onClose={() => setModal(null)} />}
       {modal?.type === 'edit' && <BranchForm branch={modal.branch} onClose={() => setModal(null)} />}
       {modal?.type === 'prices' && <PriceForm branchId={modal.branch.id} onClose={() => setModal(null)} />}
+      {modal?.type === 'team' && <BranchTeamModal branch={modal.branch} onClose={() => setModal(null)} />}
+      {modal?.type === 'admin' && <BranchAdminForm branch={modal.branch} onClose={() => setModal(null)} />}
       {modal?.type === 'activate' && (
         <ConfirmPost
           title={'Activate ' + modal.branch.name + '?'}
@@ -1055,10 +1078,94 @@ export function Branches() {
       {modal?.type === 'deactivate' && (
         <ConfirmPost
           title={'Deactivate ' + modal.branch.name + '?'}
-          text="This only works when the branch has no stock, active staff, open orders or open transfers. History is kept."
+          text="This only works when the branch has no stock, active team members, open orders or open transfers. History is kept."
           submit="Deactivate branch"
           danger
           path={`branches/${modal.branch.id}/deactivate`}
+          onClose={() => setModal(null)}
+        />
+      )}
+    </>
+  )
+}
+
+/* -------------------------------------------------------------------------- */
+/* Branch team (branch admin)                                                 */
+/* -------------------------------------------------------------------------- */
+
+export function Team() {
+  const { me, tr } = useApp()
+  const [modal, setModal] = useState(null)
+  const branchId = me?.branch_id ? String(me.branch_id) : ''
+  const team = useApi(branchId ? 'branches/' + branchId + '/team' : null, { deps: [branchId] })
+  const branch = team.data?.branch
+  const members = team.data?.members || []
+
+  return (
+    <>
+      <PageHeader title={tr('nav.team')} sub="Staff, riders and the branch admin for your branch">
+        {branch && (
+          <button className="ghost" onClick={() => setModal({ type: 'admin' })}>Change branch admin</button>
+        )}
+        <button className="primary" onClick={() => setModal({ type: 'add' })}>Add member</button>
+      </PageHeader>
+
+      <p className="scope-note">
+        You can manage staff and riders for {branch?.name || 'your branch'} only.
+        Assigning a new branch admin demotes the previous one to staff.
+      </p>
+
+      <Table
+        head={['Name', 'Username', 'Role', 'Last login', 'Status', 'Actions']}
+        loading={team.loading}
+        error={team.error}
+        onRetry={team.reload}
+        empty="No team members yet. Add your first staff member or rider."
+        rows={members.map(m => {
+          const isAdmin = m.role === 'branch_admin'
+          const active = Number(m.is_active) === 1
+          return (
+            <tr key={m.id} className={active ? undefined : 'row-void'}>
+              <td><b>{m.name}</b>{isAdmin ? <small className="sub">Current branch admin</small> : null}</td>
+              <td className="mono">@{m.username}</td>
+              <td><Badge t={m.role} /></td>
+              <td>{m.last_login_at ? dtFmt(m.last_login_at) : 'Never'}</td>
+              <td>{active ? <Badge t="active" /> : <Badge t="inactive" />}</td>
+              <td>
+                <Acts>
+                  {!isAdmin && (
+                    <button className="sm link-ac" onClick={() => setModal({ type: 'edit', member: m })}>Edit</button>
+                  )}
+                  {!isAdmin && active && (
+                    <>
+                      <button className="sm link-ac" onClick={() => setModal({ type: 'reset', member: m })}>Reset password</button>
+                      <button className="sm link-ac" onClick={() => setModal({ type: 'admin', userId: m.id })}>Make branch admin</button>
+                      <button className="sm link-danger" onClick={() => setModal({ type: 'deactivate', member: m })}>Deactivate</button>
+                    </>
+                  )}
+                </Acts>
+              </td>
+            </tr>
+          )
+        })}
+      />
+
+      {modal?.type === 'add' && <TeamMemberForm branchId={branchId} onClose={() => setModal(null)} />}
+      {modal?.type === 'edit' && <TeamMemberForm member={modal.member} branchId={branchId} onClose={() => setModal(null)} />}
+      {modal?.type === 'reset' && <ResetPasswordForm user={modal.member} onClose={() => setModal(null)} />}
+      {modal?.type === 'admin' && branch && (
+        <BranchAdminForm
+          branch={branch}
+          initialUserId={modal.userId || ''}
+          onClose={() => setModal(null)}
+        />
+      )}
+      {modal?.type === 'deactivate' && (
+        <ConfirmDelete
+          title={'Deactivate ' + modal.member.name + '?'}
+          text="They lose access immediately. Their sales, orders and history stay in the ledger."
+          submit="Deactivate member"
+          path={'users/' + modal.member.id}
           onClose={() => setModal(null)}
         />
       )}
@@ -1084,7 +1191,8 @@ export function Users() {
       </PageHeader>
 
       <p className="scope-note">
-        Staff accounts are locked to exactly one branch. Changing a role, branch or password signs that user out everywhere.
+        Branch admins, staff and delivery riders are locked to exactly one branch. A branch admin is never the owner.
+        Changing a role, branch or password signs that user out everywhere.
         New and reset accounts must choose a new password at first login.
       </p>
 
@@ -1094,7 +1202,9 @@ export function Users() {
           <select value={role} onChange={e => setRole(e.target.value)}>
             <option value="">All roles</option>
             <option value="owner">Owner</option>
+            <option value="branch_admin">Branch admin</option>
             <option value="staff">Staff</option>
+            <option value="delivery">Delivery rider</option>
             <option value="customer">Customer</option>
           </select>
         </label>
@@ -1263,7 +1373,7 @@ export function Shop() {
 
       <h2 className="sec">My orders</h2>
       <Table
-        head={['Order no.', 'Branch', 'Items', { t: 'Total', r: true }, 'Requested', 'Payment', 'Status', 'Actions']}
+        head={['Order no.', 'Branch', 'Items', { t: 'Total', r: true }, 'Requested', 'Rider', 'Payment', 'Status', 'Actions']}
         loading={orders.loading}
         error={orders.error}
         onRetry={orders.reload}
@@ -1272,9 +1382,16 @@ export function Shop() {
           <tr key={o.id}>
             <td className="mono">{o.order_no || '—'}</td>
             <td>{o.branch_name}</td>
-            <td className="wrap">{itemsSummary(o.items)}</td>
+            <td className="wrap">
+              {itemsSummary(o.items)}
+              {Number(o.is_rush) === 1 ? <small className="sub">Rush · +{peso(o.rush_fee)}</small> : null}
+              {Number(o.is_outside_zone) === 1 ? <small className="sub">Outside delivery zone · +{peso(o.outside_zone_fee)}</small> : null}
+              {o.delivery_address ? <small className="sub">{o.delivery_address}</small> : null}
+              <MapLink lat={o.delivery_latitude} lng={o.delivery_longitude} title={'Delivery location · ' + (o.order_no || 'order')} />
+            </td>
             <td className="r">{peso(o.total_amount)}</td>
             <td>{dateFmt(o.requested_date)}{o.time_slot ? <small className="sub">{o.time_slot}</small> : null}</td>
+            <td>{o.rider_name || '—'}</td>
             <td><Badge t={o.payment_type} /></td>
             <td><Badge t={o.status} /></td>
             <Acts>

@@ -29,13 +29,13 @@ if (is_dir($logDir) && is_writable($logDir)) {
 // and inline styles required by framer-motion, nothing else.
 $csp = "default-src 'self'; base-uri 'self'; object-src 'none'; "
     . "script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
-    . "font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; "
-    . "connect-src 'self'; frame-ancestors 'none'; form-action 'self'";
+    . "font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https://*.tile.openstreetmap.org; "
+    . "connect-src 'self'; frame-src https://www.openstreetmap.org; frame-ancestors 'none'; form-action 'self'";
 header('Content-Security-Policy: ' . $csp);
 header('X-Content-Type-Options: nosniff');
 header('X-Frame-Options: DENY');
 header('Referrer-Policy: strict-origin-when-cross-origin');
-header('Permissions-Policy: geolocation=(), microphone=(), camera=()');
+header('Permissions-Policy: geolocation=(self), microphone=(), camera=()');
 header('Cross-Origin-Resource-Policy: same-origin');
 if (is_https()) {
     header('Strict-Transport-Security: max-age=31536000; includeSubDomains');
@@ -72,6 +72,7 @@ $routes = [
     ['POST', '#^auth/request-otp$#', 'api_request_otp'],
 
     ['GET', '#^branches/public$#', 'api_branches_public'],
+    ['GET', '#^addresses$#', 'api_addresses'],
     ['GET', '#^sizes$#', 'api_sizes_list'],
 
     ['GET', '#^me$#', 'api_me'],
@@ -135,6 +136,8 @@ $routes = [
     ['POST', '#^branches/(\d+)/activate$#', 'api_branches_activate'],
     ['GET', '#^branches/(\d+)/prices$#', 'api_branch_prices_get'],
     ['PUT', '#^branches/(\d+)/prices$#', 'api_branch_prices_put'],
+    ['GET', '#^branches/(\d+)/team$#', 'api_branch_team'],
+    ['POST', '#^branches/(\d+)/admin$#', 'api_branch_set_admin'],
 
     ['GET', '#^transfers$#', 'api_transfers_list'],
     ['POST', '#^transfers$#', 'api_transfers_create'],

@@ -246,6 +246,8 @@ function api_report_unpaid(): void
     $rows = rows(
         "SELECT c.id, c.name, c.contact, c.address, c.credit_limit,
             COALESCE((SELECT SUM(i.line_total) FROM sales s JOIN sale_items i ON i.sale_id=s.id
+                      WHERE s.customer_id=c.id AND s.is_void=0 AND s.payment_type='credit'{$scCharged}),0)
+            + COALESCE((SELECT SUM(s.rush_fee + s.outside_zone_fee) FROM sales s
                       WHERE s.customer_id=c.id AND s.is_void=0 AND s.payment_type='credit'{$scCharged}),0) charged,
             COALESCE((SELECT SUM(p.amount) FROM payments p
                       WHERE p.customer_id=c.id AND p.is_void=0{$scPaid}),0) paid
@@ -254,7 +256,7 @@ function api_report_unpaid(): void
          HAVING charged - paid > 0.005
          ORDER BY (charged - paid) DESC, c.name
          LIMIT 5000",
-        array_merge($pCharged, $pPaid)
+        array_merge($pCharged, $pCharged, $pPaid)
     );
     foreach ($rows as &$r) {
         $r['id'] = (int) $r['id'];
@@ -394,6 +396,8 @@ function api_report_branch_comparison(): void
             COALESCE((SELECT SUM(p.amount) FROM payments p
                       WHERE p.branch_id=b.id AND p.payment_date BETWEEN ? AND ? AND p.is_void=0),0) payments,
             COALESCE((SELECT SUM(i.line_total) FROM sales s JOIN sale_items i ON i.sale_id=s.id
+                      WHERE s.branch_id=b.id AND s.is_void=0 AND s.payment_type='credit'),0)
+            + COALESCE((SELECT SUM(s.rush_fee + s.outside_zone_fee) FROM sales s
                       WHERE s.branch_id=b.id AND s.is_void=0 AND s.payment_type='credit'),0)
             - COALESCE((SELECT SUM(p.amount) FROM payments p
                       WHERE p.branch_id=b.id AND p.is_void=0),0) unpaid,

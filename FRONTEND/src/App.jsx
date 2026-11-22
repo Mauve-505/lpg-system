@@ -10,22 +10,27 @@ import Terms from './site/Terms'
 import Auth from './Auth'
 import {
   Dashboard, Orders, Deliveries, Sales, Payments, Customers, Stock,
-  Transfers, Reports, Branches, Users, Audit, Shop,
+  Transfers, Reports, Branches, Users, Audit, Shop, Team,
 } from './pages'
 import { ChangePasswordForm } from './forms'
 
+// Branch-bound operational roles share the staff pages. Delivery riders only
+// see the order queue they need to fulfil.
+const OPERATIONS = ['owner', 'branch_admin', 'staff']
+
 const PAGES = {
-  dashboard: { label: 'nav.dashboard', Comp: Dashboard, roles: ['owner', 'staff'] },
-  orders: { label: 'nav.orders', Comp: Orders, roles: ['owner', 'staff'] },
-  sales: { label: 'nav.sales', Comp: Sales, roles: ['owner', 'staff'] },
-  deliveries: { label: 'nav.deliveries', Comp: Deliveries, roles: ['owner', 'staff'] },
-  customers: { label: 'nav.customers', Comp: Customers, roles: ['owner', 'staff'] },
-  payments: { label: 'nav.payments', Comp: Payments, roles: ['owner', 'staff'] },
+  dashboard: { label: 'nav.dashboard', Comp: Dashboard, roles: OPERATIONS },
+  orders: { label: 'nav.orders', Comp: Orders, roles: [...OPERATIONS, 'delivery'] },
+  sales: { label: 'nav.sales', Comp: Sales, roles: OPERATIONS },
+  deliveries: { label: 'nav.deliveries', Comp: Deliveries, roles: OPERATIONS },
+  customers: { label: 'nav.customers', Comp: Customers, roles: OPERATIONS },
+  payments: { label: 'nav.payments', Comp: Payments, roles: OPERATIONS },
   stock: { label: 'nav.stock', Comp: Stock, roles: ['owner'] },
-  transfers: { label: 'nav.transfers', Comp: Transfers, roles: ['owner', 'staff'] },
-  reports: { label: 'nav.reports', Comp: Reports, roles: ['owner', 'staff'] },
+  transfers: { label: 'nav.transfers', Comp: Transfers, roles: OPERATIONS },
+  reports: { label: 'nav.reports', Comp: Reports, roles: OPERATIONS },
   branches: { label: 'nav.branches', Comp: Branches, roles: ['owner'] },
   users: { label: 'nav.users', Comp: Users, roles: ['owner'] },
+  team: { label: 'nav.team', Comp: Team, roles: ['branch_admin'] },
   audit: { label: 'nav.audit', Comp: Audit, roles: ['owner'] },
   shop: { label: 'nav.shop', Comp: Shop, roles: ['customer'] },
 }
@@ -141,10 +146,10 @@ function BranchScope() {
     )
   }
 
-  if (me.role === 'staff') {
+  if (['branch_admin', 'staff', 'delivery'].includes(me.role)) {
     return (
       <div className="side-scope">
-        <span>{tr('app.staffBranch')}</span>
+        <span>{me.role === 'branch_admin' ? tr('app.adminBranch') : tr('app.staffBranch')}</span>
         <strong>{me.branch_name || '—'}</strong>
       </div>
     )
@@ -161,7 +166,7 @@ function Shell() {
   if (!me) return <Navigate to="/login" replace />
 
   const keys = Object.keys(PAGES).filter(k => PAGES[k].roles.includes(me.role))
-  const home = me.role === 'customer' ? 'shop' : 'dashboard'
+  const home = me.role === 'customer' ? 'shop' : (me.role === 'delivery' ? 'orders' : 'dashboard')
   const key = keys.includes(page) ? page : home
   const Page = PAGES[key].Comp
 
@@ -302,7 +307,7 @@ export default function App() {
   useEffect(() => {
     if (!me) { setBranch(null); return }
     if (me.role === 'owner') setBranch(activeBranch || 'all')
-    else if (me.role === 'staff') setBranch(String(me.branch_id || ''))
+    else if (['branch_admin', 'staff', 'delivery'].includes(me.role)) setBranch(String(me.branch_id || ''))
     else setBranch(null)
   }, [me, activeBranch])
 
@@ -329,7 +334,7 @@ export default function App() {
     get('sizes')
       .then(list => { if (live) setSizes(Array.isArray(list) ? list : []) })
       .catch(() => { if (live) setSizes([]) })
-    if (me.role !== 'customer') {
+    if (me.role !== 'customer' && me.role !== 'delivery') {
       get('customers')
         .then(list => { if (live) setCustomers(Array.isArray(list) ? list : []) })
         .catch(() => { if (live) setCustomers([]) })

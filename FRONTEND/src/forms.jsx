@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { del, get, patch, post, publicGet, put, withBranch } from './api'
 import {
-  BranchSelect, Modal, copyText, formatDate, peso, today, useApp, useDone,
+  AddressFields, Badge, BranchSelect, MapLink, Modal, PersonNameFields, copyText, formatDate, peso, today, useApp, useDone,
 } from './ui'
 
 /* -------------------------------------------------------------------------- */
@@ -43,6 +43,48 @@ function BranchField({ write }) {
       <p className="hint">You are viewing all branches. Choose the branch this record belongs to.</p>
     </div>
   )
+}
+
+/** Copy the address keys that were actually submitted for a given prefix. */
+export function addressBody(f, prefix = '') {
+  const keys = ['address', 'street', 'barangay', 'city', 'province', 'region', 'postal_code', 'latitude', 'longitude']
+  const out = {}
+  keys.forEach(key => {
+    const name = prefix + key
+    if (Object.prototype.hasOwnProperty.call(f, name)) out[name] = f[name]
+  })
+  return out
+}
+
+/**
+ * Copy a person name from the submitted form. PersonNameFields keeps a hidden
+ * legacy `name` for old records, so sending only the keys that exist lets the
+ * API prefer the structured parts and still accept untouched legacy names.
+ */
+function nameBody(f) {
+  const keys = ['name', 'first_name', 'middle_name', 'last_name', 'name_suffix']
+  const out = {}
+  keys.forEach(key => {
+    if (Object.prototype.hasOwnProperty.call(f, key)) out[key] = f[key]
+  })
+  return out
+}
+
+/** True when this branch's same-day order cutoff has already passed. */
+function cutoffPassed(branch) {
+  if (!branch?.cutoff_time) return false
+  const [h, m] = String(branch.cutoff_time).split(':').map(Number)
+  const [nowH, nowM] = new Date()
+    .toLocaleTimeString('en-GB', { timeZone: 'Asia/Manila', hour12: false })
+    .split(':')
+    .map(Number)
+  return nowH * 60 + nowM > h * 60 + m
+}
+
+/** Next calendar day for a YYYY-MM-DD string, without timezone drift. */
+function nextDay(iso) {
+  const [y, m, d] = String(iso).split('-').map(Number)
+  return new Date(Date.UTC(y, m - 1, d + 1)).toISOString().slice(0, 10)
 }
 
 const blankLine = kind => {
@@ -325,9 +367,9 @@ export function CustomerForm({ customer, onClose }) {
 
   async function submit(f) {
     const body = {
-      name: f.name,
+      ...nameBody(f),
+      ...addressBody(f),
       contact: f.contact,
-      address: f.address,
       credit_limit: f.credit_limit === '' ? null : Number(f.credit_limit),
       is_reseller: f.is_reseller === 'on',
       reseller_status: f.reseller_status || 'none',
@@ -360,9 +402,9 @@ export function CustomerForm({ customer, onClose }) {
           <p className="hint">The customer's contact and credit details are shared across all branches.</p>
         </div>
       )}
-      <label className="full">Name<input name="name" maxLength={100} defaultValue={customer?.name || ''} required autoFocus /></label>
+      <PersonNameFields value={customer || {}} required={!customer} autoFocus />
       <label>Contact number<input name="contact" maxLength={50} defaultValue={customer?.contact || ''} /></label>
-      <label>Address / area<input name="address" maxLength={200} defaultValue={customer?.address || ''} /></label>
+      <AddressFields value={customer || {}} label="Address / area" idPrefix="customer-address" />
       <label>Credit limit (₱)
         <input type="number" name="credit_limit" min="0" step="0.01" defaultValue={customer?.credit_limit ?? ''} placeholder="No limit" />
       </label>
@@ -584,12 +626,14 @@ export function BranchForm({ branch, onClose }) {
     const body = {
       name: f.name,
       code: f.code,
-      address: f.address,
+      ...addressBody(f),
       contact_phone: f.contact_phone,
       service_area_notes: f.service_area_notes,
       operating_hours: f.operating_hours,
       cutoff_time: f.cutoff_time,
       max_order_qty: Number(f.max_order_qty) || 1,
+      rush_fee: Number(f.rush_fee) || 0,
+      outside_zone_fee: Number(f.outside_zone_fee) || 0,
     }
     if (branch) await put('branches/' + branch.id, body)
     else await post('branches', body)
@@ -601,7 +645,7 @@ export function BranchForm({ branch, onClose }) {
       <label className="full">Branch name<input name="name" maxLength={100} defaultValue={branch?.name || ''} required autoFocus /></label>
       <label>Branch code<input name="code" maxLength={20} defaultValue={branch?.code || ''} placeholder="MAIN" required /></label>
       <label>Contact number<input name="contact_phone" maxLength={40} defaultValue={branch?.contact_phone || ''} /></label>
-      <label className="full">Address<input name="address" maxLength={200} defaultValue={branch?.address || ''} /></label>
+      <AddressFields value={branch || {}} label="Branch address" idPrefix="branch-address" />
       <label>Operating hours<input name="operating_hours" maxLength={200} defaultValue={branch?.operating_hours || ''} placeholder="e.g. 8:00 AM - 6:00 PM" /></label>
       <label>Same-day cut-off
         <input type="time" name="cutoff_time" defaultValue={branch?.cutoff_time || ''} />
@@ -609,9 +653,275 @@ export function BranchForm({ branch, onClose }) {
       <label>Max cylinders per order
         <input type="number" name="max_order_qty" min="1" max="500" defaultValue={branch?.max_order_qty ?? 20} required />
       </label>
+      <label>Rush order fee (₱)
+        <input type="number" name="rush_fee" min="0" step="0.01" list="rush-fee-presets" defaultValue={branch?.rush_fee ?? 50} />
+        <span className="hint">Standard ₱50. Use ₱100 for a premium rush; rush is always delivered the same day.</span>
+      </label>
+      <datalist id="rush-fee-presets">
+        <option value="50" />
+        <option value="100" />
+      </datalist>
+      <label>Outside-zone fee (₱)
+        <input type="number" name="outside_zone_fee" min="0" step="0.01" defaultValue={branch?.outside_zone_fee ?? 0} />
+      </label>
       <label className="full">Service area notes
         <textarea name="service_area_notes" rows={3} maxLength={500} defaultValue={branch?.service_area_notes || ''} />
       </label>
+      <p className="hint full">
+        Rush and outside-zone fees are added to a customer order when the corresponding option is chosen.
+        Rush orders are delivered today and ignore the same-day cut-off. Set a fee to 0 to offer that add-on for free.
+      </p>
+    </Modal>
+  )
+}
+
+const BRANCH_ROLES = ['branch_admin', 'staff', 'delivery']
+
+export function BranchTeamModal({ branch, onClose }) {
+  const { tr } = useApp()
+  const [team, setTeam] = useState(null)
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    let live = true
+    get('branches/' + branch.id + '/team')
+      .then(result => { if (live) setTeam(result) })
+      .catch(err => { if (live) setError(err.message) })
+    return () => { live = false }
+  }, [branch.id])
+
+  const members = team?.members || []
+
+  return (
+    <Modal title={'Team · ' + branch.name} submit={tr('common.close')} wide onClose={onClose} onSubmit={async () => onClose?.()}>
+      {error && <p className="form-error full" role="alert">{error}</p>}
+      {!team && !error && <p className="hint full" role="status">Loading team…</p>}
+      {team && (
+        <>
+          <p className="hint full">
+            Branch admin: <b>{team.branch?.branch_admin?.name || 'Not assigned yet'}</b>.
+            Riders are marked with the delivery role.
+          </p>
+          {!members.length && <p className="hint full">No branch users yet.</p>}
+          <div className="team-list full">
+            {members.map(m => (
+              <div className="team-row" key={m.id}>
+                <div className="who">
+                  <strong>{m.name}</strong>
+                  <small>@{m.username} · {tr('status.' + m.role, m.role)}{m.is_rider ? ' · rider' : ''}</small>
+                </div>
+                <Badge t={Number(m.is_active) === 1 ? 'active' : 'inactive'} />
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+    </Modal>
+  )
+}
+
+export function BranchAdminForm({ branch, initialUserId = '', onClose }) {
+  const { tr } = useApp()
+  const done = useDone(onClose)
+  const [mode, setMode] = useState('existing')
+  const [users, setUsers] = useState([])
+  const [error, setError] = useState('')
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    let live = true
+    get('users?per_page=100')
+      .then(list => {
+        if (!live) return
+        setUsers((Array.isArray(list) ? list : []).filter(u =>
+          Number(u.is_active) === 1 && u.role !== 'owner' && u.role !== 'customer'
+        ))
+      })
+      .catch(err => { if (live) setError(err.message) })
+      .finally(() => { if (live) setLoading(false) })
+    return () => { live = false }
+  }, [])
+
+  async function submit(f) {
+    if (mode === 'existing') {
+      if (!f.user_id) throw new Error('Choose the user who will manage this branch.')
+      await post('branches/' + branch.id + '/admin', { user_id: Number(f.user_id) })
+      done('Branch admin assigned')
+      return
+    }
+    await post('branches/' + branch.id + '/admin', {
+      ...nameBody(f),
+      username: f.username,
+      password: f.password,
+      contact: f.contact,
+    })
+    done('Branch admin created')
+  }
+
+  return (
+    <Modal title={'Branch admin · ' + branch.name} submit={tr('common.save')} onClose={onClose} onSubmit={submit}>
+      <p className="hint full">
+        Each branch has one branch admin and it can never be the owner. Assigning someone new demotes the previous admin to staff.
+      </p>
+      {error && <p className="form-error full" role="alert">{error}</p>}
+      <label className="full">How should the admin be set up?
+        <select value={mode} onChange={e => setMode(e.target.value)}>
+          <option value="existing">Use an existing user</option>
+          <option value="new">Create a new branch admin</option>
+        </select>
+      </label>
+      {mode === 'existing' ? (
+        <label className="full">User
+          <select
+            name="user_id"
+            defaultValue={initialUserId ? String(initialUserId) : (branch.branch_admin_id ? String(branch.branch_admin_id) : '')}
+            required
+          >
+            <option value="">Choose an active user</option>
+            {users.map(u => (
+              <option key={u.id} value={u.id}>
+                {u.name} · @{u.username} · {tr('status.' + u.role, u.role)}{u.branch_name ? ' · ' + u.branch_name : ''}
+              </option>
+            ))}
+          </select>
+        </label>
+      ) : (
+        <>
+          <PersonNameFields value={{}} required />
+          <label>Username<input name="username" maxLength={30} pattern="[A-Za-z0-9_.-]+" required /></label>
+          <label>Temporary password<input type="password" name="password" minLength={8} autoComplete="new-password" required /></label>
+          <label>Contact number<input name="contact" maxLength={50} /></label>
+        </>
+      )}
+      {loading && mode === 'existing' && <p className="hint full" role="status">Loading users…</p>}
+    </Modal>
+  )
+}
+
+/**
+ * Add or edit a staff or delivery member of the branch. Branch admins use this
+ * from the Team page; the API forces the branch and allowed roles server-side.
+ */
+export function TeamMemberForm({ member = null, branchId, onClose }) {
+  const { tr } = useApp()
+  const done = useDone(onClose)
+  const [role, setRole] = useState(member?.role || 'staff')
+
+  async function submit(f) {
+    if (!branchId) throw new Error('Your branch is not available.')
+    const body = {
+      ...nameBody(f),
+      username: f.username,
+      role,
+      branch_id: Number(branchId),
+      is_active: member ? f.is_active === 'on' : true,
+    }
+    if (member) {
+      await put('users/' + member.id, body)
+      done('Team member updated')
+      return
+    }
+    await post('users', {
+      ...body,
+      password: f.password,
+      contact: f.contact,
+    })
+    done('Team member added. Share the temporary password securely; they must change it on first login.')
+  }
+
+  return (
+    <Modal title={member ? 'Edit team member' : 'Add team member'} submit={tr('common.save')} onClose={onClose} onSubmit={submit}>
+      <p className="hint full">
+        You manage only your own branch. New accounts must choose a new password at first login.
+      </p>
+      <PersonNameFields value={member || {}} required={!member} autoFocus />
+      <label>Username
+        <input
+          name="username"
+          maxLength={30}
+          pattern="[A-Za-z0-9_.-]+"
+          defaultValue={member?.username || ''}
+          autoComplete="off"
+          required
+        />
+      </label>
+      {!member && (
+        <label>Temporary password
+          <input type="password" name="password" minLength={8} autoComplete="new-password" required />
+        </label>
+      )}
+      <label>Role
+        <select value={role} onChange={e => setRole(e.target.value)}>
+          <option value="staff">Staff</option>
+          <option value="delivery">Delivery rider</option>
+        </select>
+      </label>
+      {!member && (
+        <label>Contact number
+          <input name="contact" maxLength={50} />
+        </label>
+      )}
+      {member && (
+        <label className="check full">
+          <input type="checkbox" name="is_active" defaultChecked={Number(member.is_active) === 1} />
+          Active (can sign in)
+        </label>
+      )}
+      <p className="hint full">
+        To hand over the branch admin role, use “Make branch admin” on the Team page.
+        Assigning someone new demotes the previous admin to staff.
+      </p>
+    </Modal>
+  )
+}
+
+export function AssignRiderForm({ order, onClose }) {
+  const { me, tr } = useApp()
+  const done = useDone(onClose)
+  const [team, setTeam] = useState(null)
+  const [riderId, setRiderId] = useState(order.rider_id ? String(order.rider_id) : '')
+  const [error, setError] = useState('')
+  const isDelivery = me?.role === 'delivery'
+
+  useEffect(() => {
+    let live = true
+    get('branches/' + order.branch_id + '/team')
+      .then(result => { if (live) setTeam(result) })
+      .catch(err => { if (live) setError(err.message) })
+    return () => { live = false }
+  }, [order.branch_id])
+
+  const members = (team?.members || []).filter(m => Number(m.is_active) === 1)
+
+  async function submit() {
+    const assigned = isDelivery ? me.id : (riderId ? Number(riderId) : null)
+    await post('orders/' + order.id + '/assign', { rider_id: assigned })
+    done(assigned ? 'Rider assigned' : 'Rider cleared')
+  }
+
+  return (
+    <Modal title={'Assign rider · ' + (order.order_no || order.customer)} submit={tr('common.save')} onClose={onClose} onSubmit={submit}>
+      {error && <p className="form-error full" role="alert">{error}</p>}
+      <p className="hint full">
+        Deliver to {order.customer}{order.delivery_address ? ' at ' + order.delivery_address : ''}.
+        <MapLink lat={order.delivery_latitude} lng={order.delivery_longitude} title={'Delivery location · ' + order.customer} />
+      </p>
+      {isDelivery ? (
+        <p className="full">Assign this delivery to yourself? You can deliver it from the orders list afterwards.</p>
+      ) : (
+        <label className="full">Rider
+          <select value={riderId} onChange={e => setRiderId(e.target.value)}>
+            <option value="">Unassigned</option>
+            {members.map(m => (
+              <option key={m.id} value={m.id}>
+                {m.name} · {tr('status.' + m.role, m.role)}{m.is_rider ? ' (rider)' : ''}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
+      {team === null && !error && <p className="hint full" role="status">Loading branch team…</p>}
+      {team !== null && !members.length && !isDelivery && <p className="hint full">No active branch users available.</p>}
     </Modal>
   )
 }
@@ -622,43 +932,47 @@ export function UserForm({ user, onClose }) {
   const [role, setRole] = useState(user?.role || 'staff')
 
   async function submit(f) {
-    if (role === 'staff' && !f.branch_id) throw new Error('Choose a branch for staff.')
+    if (BRANCH_ROLES.includes(role) && !f.branch_id) {
+      throw new Error('Choose a branch for this role.')
+    }
     if (user) {
       await put('users/' + user.id, {
-        name: f.name,
+        ...nameBody(f),
         username: f.username,
         role,
-        branch_id: role === 'staff' ? Number(f.branch_id) : null,
+        branch_id: BRANCH_ROLES.includes(role) ? Number(f.branch_id) : null,
         is_active: f.is_active === 'on',
       })
       done('User updated')
       return
     }
     await post('users', {
-      name: f.name,
+      ...nameBody(f),
       username: f.username,
       password: f.password,
       role,
-      branch_id: role === 'staff' ? Number(f.branch_id) : null,
+      branch_id: BRANCH_ROLES.includes(role) ? Number(f.branch_id) : null,
       contact: f.contact,
-      address: f.address,
+      ...(role === 'customer' ? addressBody(f) : {}),
     })
     done('User created. Share the temporary password securely; they must change it on first login.')
   }
 
   return (
     <Modal title={user ? 'Edit user' : 'Add a user'} submit={user ? tr('common.save') : 'Create user'} onClose={onClose} onSubmit={submit}>
-      <label>Full name<input name="name" maxLength={100} defaultValue={user?.name || ''} required autoFocus /></label>
+      <PersonNameFields value={user || {}} required={!user} />
       <label>Username<input name="username" maxLength={30} pattern="[A-Za-z0-9_.-]+" defaultValue={user?.username || ''} required /></label>
       {!user && <label className="full">Temporary password<input type="password" name="password" minLength={8} autoComplete="new-password" required /></label>}
       <label>Role
         <select value={role} onChange={e => setRole(e.target.value)}>
           <option value="staff">Staff</option>
+          <option value="branch_admin">Branch admin</option>
+          <option value="delivery">Delivery rider</option>
           <option value="owner">Owner</option>
           <option value="customer">Customer</option>
         </select>
       </label>
-      {role === 'staff' && (
+      {BRANCH_ROLES.includes(role) && (
         <label>Assigned branch
           <select name="branch_id" defaultValue={user?.branch_id ? String(user.branch_id) : ''} required>
             <option value="">Choose branch</option>
@@ -669,7 +983,7 @@ export function UserForm({ user, onClose }) {
       {!user && role === 'customer' && (
         <>
           <label>Contact number<input name="contact" maxLength={50} /></label>
-          <label>Address<input name="address" maxLength={200} /></label>
+          <AddressFields value={{}} label="Address / area" idPrefix="user-address" />
         </>
       )}
       {user && (
@@ -678,7 +992,7 @@ export function UserForm({ user, onClose }) {
           Account is active
         </label>
       )}
-      <p className="hint full">Staff must be assigned to exactly one branch. Changing a role or branch signs that user out everywhere.</p>
+      <p className="hint full">Branch admins, staff and delivery riders must belong to exactly one branch. A branch admin is never the owner. Changing a role or branch signs that user out everywhere.</p>
     </Modal>
   )
 }
@@ -732,10 +1046,29 @@ export function OrderForm({ order, onClose }) {
   const { branches, sizes: globalSizes, tr } = useApp()
   const done = useDone(onClose)
   const [branchId, setBranchId] = useState(order?.branch_id ? String(order.branch_id) : (branches[0]?.id ? String(branches[0].id) : ''))
+  const [requested, setRequested] = useState(() => {
+    if (order?.requested_date) return order.requested_date
+    const initial = branches.find(b => String(b.id) === String(branchId))
+    return cutoffPassed(initial) ? nextDay(today()) : today()
+  })
   const [sizes, setSizes] = useState(order ? globalSizes : [])
   const [loadingSizes, setLoadingSizes] = useState(false)
   const { lines, setLines, update, add, remove } = useLines(order?.items || null, 'order')
   const [pay, setPay] = useState(order?.payment_type || 'cash')
+  const [rush, setRush] = useState(Number(order?.is_rush) === 1)
+  const [outside, setOutside] = useState(Number(order?.is_outside_zone) === 1)
+
+  const branch = branches.find(b => String(b.id) === String(branchId))
+  const rushFee = rush ? Number(branch?.rush_fee || 0) : 0
+  const outsideFee = outside ? Number(branch?.outside_zone_fee || 0) : 0
+  const deliveryValue = order ? {
+    address: order.delivery_address,
+    street: order.delivery_street,
+    barangay: order.delivery_barangay,
+    city: order.delivery_city,
+    latitude: order.delivery_latitude,
+    longitude: order.delivery_longitude,
+  } : {}
 
   useEffect(() => {
     if (!branchId) { setSizes([]); return undefined }
@@ -758,10 +1091,29 @@ export function OrderForm({ order, onClose }) {
     )))
   }, [sizes, setLines])
 
+  // Rush is a same-day service, so selecting it always pins the date to today.
+  useEffect(() => {
+    if (rush) setRequested(today())
+  }, [rush])
+
+  // A branch that has closed for same-day orders cannot take today's date.
+  // Move the default to tomorrow so "Send order" is not rejected by the API.
+  useEffect(() => {
+    if (order || rush) return
+    setRequested(r => (cutoffPassed(branch) && r === today() ? nextDay(today()) : r))
+  }, [branchId, order, rush])
+
   const total = lines.reduce((sum, l) => sum + (Number(l.qty) || 0) * linePrice(l, sizes) + (Number(l.deposit_amount) || 0), 0)
+    + rushFee + outsideFee
 
   async function submit(f) {
     if (!branchId) throw new Error('Choose a branch.')
+    if (!rush && requested === today() && cutoffPassed(branch)) {
+      throw new Error(
+        `Same-day orders for ${branch.name} closed at ${String(branch.cutoff_time).slice(0, 5)}. ` +
+        `Choose ${nextDay(today())} or a later date, or select rush delivery.`,
+      )
+    }
     const items = lines.map(l => ({
       size_id: Number(l.size_id),
       qty: Number(l.qty),
@@ -771,11 +1123,18 @@ export function OrderForm({ order, onClose }) {
       branch_id: Number(branchId),
       pay,
       notes: f.notes,
-      requested_date: f.requested_date,
+      requested_date: rush ? today() : (f.requested_date || requested),
       time_slot: f.time_slot,
-      delivery_address: f.delivery_address,
       valve_type: f.valve_type,
+      is_rush: rush,
+      is_outside_zone: outside,
       items,
+    }
+    // Only replace the stored delivery address when the customer entered one;
+    // an omitted address falls back to the saved account address.
+    const delivery = addressBody(f, 'delivery_')
+    if (delivery.delivery_address || delivery.delivery_street || delivery.delivery_barangay || delivery.delivery_city) {
+      Object.assign(body, delivery)
     }
     if (order) await patch('my/orders/' + order.id, body)
     else await post('my/orders', body)
@@ -791,14 +1150,34 @@ export function OrderForm({ order, onClose }) {
         </select>
       </label>
       <label>{tr('common.date')} requested
-        <input type="date" name="requested_date" min={today()} defaultValue={order?.requested_date || today()} required />
+        <input
+          type="date"
+          name="requested_date"
+          min={today()}
+          value={requested}
+          onChange={e => setRequested(e.target.value)}
+          disabled={rush}
+          required
+        />
+        {rush ? (
+          <span className="hint">Rush orders are delivered today. The branch cut-off does not apply.</span>
+        ) : cutoffPassed(branch) && (
+          <span className="hint">
+            Same-day orders closed at {String(branch.cutoff_time).slice(0, 5)}.
+            {requested === today() ? ` Earliest date is ${nextDay(today())}, or choose rush delivery for today.` : ''}
+          </span>
+        )}
       </label>
       <label>Time slot
         <input name="time_slot" maxLength={40} defaultValue={order?.time_slot || ''} placeholder="e.g. Morning" />
       </label>
-      <label className="full">Delivery address
-        <input name="delivery_address" maxLength={200} defaultValue={order?.delivery_address || ''} placeholder="Leave blank to use your account address" />
-      </label>
+      <AddressFields value={deliveryValue} label="Delivery address" idPrefix="order-delivery" />
+      <p className="hint full">
+        Leave the address blank to use the address saved on your account.
+        {Number(order?.delivery_latitude) || Number(order?.delivery_longitude)
+          ? ' The saved delivery pin is shown in the order list.'
+          : ''}
+      </p>
       <label>Payment
         <select value={pay} onChange={e => setPay(e.target.value)}>
           <option value="cash">Cash on delivery</option>
@@ -812,6 +1191,16 @@ export function OrderForm({ order, onClose }) {
           <option value="pol">POL</option>
         </select>
       </label>
+      <div className="full fee-line">
+        <label className="fee-check">
+          <input type="checkbox" checked={rush} onChange={e => setRush(e.target.checked)} />
+          Rush order — today{Number(branch?.rush_fee || 0) > 0 ? ` (+${peso(branch.rush_fee)})` : ''}
+        </label>
+        <label className="fee-check">
+          <input type="checkbox" checked={outside} onChange={e => setOutside(e.target.checked)} />
+          Outside delivery zone{Number(branch?.outside_zone_fee || 0) > 0 ? ` (+${peso(branch.outside_zone_fee)})` : ''}
+        </label>
+      </div>
       <label className="full">Notes<input name="notes" maxLength={200} defaultValue={order?.notes || ''} placeholder="Landmark, gate colour, etc." /></label>
       {loadingSizes && <p className="hint full" role="status">Loading branch prices…</p>}
       {!loadingSizes && !sizes.length && <p className="form-error full">This branch has no available cylinder sizes right now.</p>}
@@ -839,7 +1228,13 @@ export function DeliverForm({ order, onClose }) {
       <p className="full">
         Deliver to <b>{order.customer}</b>{order.delivery_address ? ' at ' + order.delivery_address : ''}.
         This records a sale, deducts full cylinders and updates the customer&rsquo;s empties.
+        <MapLink lat={order.delivery_latitude} lng={order.delivery_longitude} title={'Delivery location · ' + order.customer} />
       </p>
+      {(Number(order.rush_fee) > 0 || Number(order.outside_zone_fee) > 0) && (
+        <p className="hint full">
+          Order fees already included: rush {peso(order.rush_fee)} · outside zone {peso(order.outside_zone_fee)}.
+        </p>
+      )}
       <div className="line-editor full">
         <div className="line-head" aria-hidden="true"><span>Cylinder size</span><span>Qty</span><span>Empties received</span></div>
         {items.map((it, i) => (

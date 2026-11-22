@@ -179,6 +179,24 @@ dialog footer{display:flex;justify-content:flex-end;gap:10px;padding:0 22px 20px
 .line-foot{display:flex;justify-content:flex-start}
 .price-row{grid-template-columns:minmax(140px,1.4fr) minmax(90px,.8fr) minmax(110px,1fr) minmax(90px,.8fr)}
 
+/* structured names, addresses and maps */
+.name-fields,.addr-fields{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.addr-toggle{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
+.addr-title{font-size:13px;font-weight:700;color:var(--mut)}
+.addr-meta{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
+.addr-actions{display:flex;gap:8px;flex-wrap:wrap}
+.addr-meta .hint{flex:1 1 220px}
+.map-frame{width:100%;border:1px solid var(--ln);border-radius:12px;overflow:hidden;background:var(--bg)}
+.map-frame iframe{display:block;width:100%;height:340px;border:0}
+.fee-line{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.fee-check{display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600;color:var(--mut);padding:10px 12px;border:1px solid var(--ln);border-radius:10px;background:var(--bg)}
+.fee-check input{width:auto}
+.team-list{display:grid;gap:8px}
+.team-row{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 12px;border:1px solid var(--ln);border-radius:10px;background:var(--bg)}
+.team-row .who{color:var(--ink)}
+.team-row .who small{color:var(--mut);font-size:12px}
+.team-row select{max-width:260px}
+
 /* receipt */
 .receipt{border:1px dashed var(--ln);border-radius:12px;padding:18px;background:var(--sf);color:var(--ink)}
 .receipt h4{margin:0;font-size:18px}
@@ -202,6 +220,7 @@ dialog footer{display:flex;justify-content:flex-end;gap:10px;padding:0 22px 20px
   .line-row{grid-template-columns:1fr 1fr}
   .line-row .ic{grid-column:2;justify-self:end}
   .price-row{grid-template-columns:1fr 1fr}
+  .name-fields,.addr-fields{grid-template-columns:1fr}
   .pager{align-items:flex-start;flex-direction:column}
 }
 @media (prefers-reduced-motion:reduce){

@@ -323,6 +323,13 @@ function customer_balance(int $customerId, ?int $branchId = null): array
          WHERE s.customer_id=? AND s.is_void=0{$b}",
         $p
     );
+    // Rush / outside-zone fees are charged once per sale, not once per line.
+    $fees = (float) val(
+        "SELECT COALESCE(SUM(s.rush_fee + s.outside_zone_fee),0) FROM sales s
+         WHERE s.customer_id=? AND s.is_void=0 AND s.payment_type='credit'{$b}",
+        $p,
+        0
+    );
     $pb = '';
     $pp = [$customerId];
     if ($branchId !== null) {
@@ -330,10 +337,11 @@ function customer_balance(int $customerId, ?int $branchId = null): array
         $pp[] = $branchId;
     }
     $paid = (float) val("SELECT COALESCE(SUM(p.amount),0) FROM payments p WHERE p.customer_id=? AND p.is_void=0{$pb}", $pp, 0);
+    $charged = round((float) ($sale['charged'] ?? 0) + $fees, 2);
     return [
-        'charged' => (float) ($sale['charged'] ?? 0),
+        'charged' => $charged,
         'paid' => $paid,
-        'balance' => round((float) ($sale['charged'] ?? 0) - $paid, 2),
+        'balance' => round($charged - $paid, 2),
         'empties_owed' => (int) ($sale['empties_owed'] ?? 0),
     ];
 }
@@ -344,7 +352,9 @@ function customer_balances_by_branch(int $customerId): array
         "SELECT b.id branch_id, b.name branch_name,
             COALESCE((SELECT SUM(CASE WHEN s.payment_type='credit' THEN i.line_total ELSE 0 END)
                       FROM sales s JOIN sale_items i ON i.sale_id=s.id
-                      WHERE s.customer_id=? AND s.branch_id=b.id AND s.is_void=0),0) charged,
+                      WHERE s.customer_id=? AND s.branch_id=b.id AND s.is_void=0),0)
+            + COALESCE((SELECT SUM(s.rush_fee + s.outside_zone_fee) FROM sales s
+                      WHERE s.customer_id=? AND s.branch_id=b.id AND s.is_void=0 AND s.payment_type='credit'),0) charged,
             COALESCE((SELECT SUM(p.amount) FROM payments p
                       WHERE p.customer_id=? AND p.branch_id=b.id AND p.is_void=0),0) paid,
             COALESCE((SELECT SUM(i.qty-i.empties_received)
@@ -354,7 +364,7 @@ function customer_balances_by_branch(int $customerId): array
          WHERE b.is_active=1
             OR EXISTS (SELECT 1 FROM sales s2 WHERE s2.customer_id=? AND s2.branch_id=b.id)
          ORDER BY b.name",
-        [$customerId, $customerId, $customerId, $customerId]
+        [$customerId, $customerId, $customerId, $customerId, $customerId]
     );
     foreach ($rows as &$r) {
         $r['branch_id'] = (int) $r['branch_id'];
@@ -512,4 +522,273 @@ function to_int($v): int
 function money($v): float
 {
     return round((float) $v, 2);
+}
+
+/* ------------------------------------------------------------------------- */
+/* Structured names and addresses                                            */
+/* ------------------------------------------------------------------------- */
+
+function address_catalog_raw(): array
+{
+    static $raw = null;
+    if ($raw === null) {
+        $raw = require __DIR__ . '/data/addresses.php';
+    }
+    return $raw;
+}
+
+/** @return array<string,array> city name => city row */
+function address_catalog(): array
+{
+    static $byCity = null;
+    if ($byCity !== null) {
+        return $byCity;
+    }
+    $byCity = [];
+    foreach (address_catalog_raw()['cities'] as $city) {
+        $byCity[$city['name']] = $city;
+    }
+    return $byCity;
+}
+
+function address_regions(): array
+{
+    return address_catalog_raw()['regions'];
+}
+
+function address_provinces(): array
+{
+    return address_catalog_raw()['provinces'];
+}
+
+function address_find_city(?string $name): ?array
+{
+    if ($name === null || trim($name) === '') {
+        return null;
+    }
+    $needle = mb_strtolower(trim($name));
+    foreach (address_catalog() as $city) {
+        if (mb_strtolower((string) $city['name']) === $needle) {
+            return $city;
+        }
+    }
+    return null;
+}
+
+/** True when the JSON body contains the key at all (including null). */
+function body_has(string $key): bool
+{
+    return array_key_exists($key, read_json_body());
+}
+
+/** True when any structured/legacy address field for the prefix was sent. */
+function address_provided(string $prefix = '', ?string $legacyKey = null): bool
+{
+    $legacyKey = $legacyKey ?? ($prefix === '' ? 'address' : $prefix . 'address');
+    foreach ([
+        $legacyKey,
+        $prefix . 'street', $prefix . 'barangay', $prefix . 'city',
+        $prefix . 'province', $prefix . 'region', $prefix . 'postal_code',
+        $prefix . 'latitude', $prefix . 'longitude',
+    ] as $key) {
+        if (body_has($key)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/** Optional trimmed string from the JSON body with an explicit maximum length. */
+function optional_input_str(string $key, int $max, int $min = 0): string
+{
+    $value = body_value($key);
+    if ($value === null || $value === '') {
+        return '';
+    }
+    if (!is_string($value) && !is_numeric($value)) {
+        fail(ucfirst(str_replace('_', ' ', $key)) . ' must be text.', 422, 'validation_error', ['field' => $key]);
+    }
+    $value = trim((string) $value);
+    if (strpos($value, "\0") !== false) {
+        fail(ucfirst(str_replace('_', ' ', $key)) . ' contains an invalid character.', 422, 'validation_error', ['field' => $key]);
+    }
+    if (mb_strlen($value) > $max) {
+        fail(ucfirst(str_replace('_', ' ', $key)) . ' is too long (maximum ' . $max . ' characters).', 422, 'validation_error', ['field' => $key]);
+    }
+    if ($min > 0 && mb_strlen($value) < $min) {
+        fail(ucfirst(str_replace('_', ' ', $key)) . ' is too short.', 422, 'validation_error', ['field' => $key]);
+    }
+    return $value;
+}
+
+/**
+ * Read a person name. Structured fields win; the legacy single `name` field is
+ * still accepted so older clients and imports keep working.
+ *
+ * Display format: "Last, First Middle Suffix"
+ */
+function person_name_input(string $label = 'Full name'): array
+{
+    $first = optional_input_str('first_name', 60);
+    $middle = optional_input_str('middle_name', 60);
+    $last = optional_input_str('last_name', 60);
+    $suffix = optional_input_str('name_suffix', 20);
+
+    if ($first === '' && $middle === '' && $last === '' && $suffix === '') {
+        return [
+            'name' => input_str('name', $label, 2, 100),
+            'first_name' => null,
+            'middle_name' => null,
+            'last_name' => null,
+            'name_suffix' => null,
+        ];
+    }
+    if ($first === '') {
+        fail('First name is required.', 422, 'validation_error', ['field' => 'first_name']);
+    }
+    if ($last === '') {
+        fail('Last name is required.', 422, 'validation_error', ['field' => 'last_name']);
+    }
+
+    $given = $first . ($middle !== '' ? ' ' . $middle : '');
+    $name = $last . ', ' . $given . ($suffix !== '' ? ' ' . $suffix : '');
+
+    return [
+        'name' => $name,
+        'first_name' => $first,
+        'middle_name' => $middle === '' ? null : $middle,
+        'last_name' => $last,
+        'name_suffix' => $suffix === '' ? null : $suffix,
+    ];
+}
+
+/** Payload fields for a person name stored on the row. */
+function person_name_payload(array $row): array
+{
+    return [
+        'first_name' => $row['first_name'] ?? null,
+        'middle_name' => $row['middle_name'] ?? null,
+        'last_name' => $row['last_name'] ?? null,
+        'name_suffix' => $row['name_suffix'] ?? null,
+    ];
+}
+
+function optional_body_decimal(string $key, float $min, float $max): ?float
+{
+    $value = body_value($key);
+    if ($value === null || $value === '') {
+        return null;
+    }
+    if (is_bool($value) || !is_numeric($value)) {
+        fail(ucfirst(str_replace('_', ' ', $key)) . ' must be a number.', 422, 'validation_error', ['field' => $key]);
+    }
+    $n = (float) $value;
+    if (!is_finite($n) || $n < $min || $n > $max) {
+        fail(ucfirst(str_replace('_', ' ', $key)) . ' is out of range.', 422, 'validation_error', ['field' => $key]);
+    }
+    return round($n, 7);
+}
+
+/**
+ * Read a structured address from the body. `$prefix` keeps keys unique when a
+ * form contains more than one address (for example delivery_* on an order).
+ *
+ * If no structured street/barangay/city was supplied, the legacy free-text
+ * address field is used unchanged so older clients keep working.
+ */
+function address_input(string $prefix = '', string $label = 'Address', bool $required = false, ?string $legacyKey = null): array
+{
+    $street = optional_input_str($prefix . 'street', 160);
+    $barangay = optional_input_str($prefix . 'barangay', 100);
+    $cityName = optional_input_str($prefix . 'city', 100);
+    $latitude = optional_body_decimal($prefix . 'latitude', -90, 90);
+    $longitude = optional_body_decimal($prefix . 'longitude', -180, 180);
+
+    $structured = $street !== '' || $barangay !== '' || $cityName !== '';
+    if (!$structured) {
+        $legacyKey = $legacyKey ?? ($prefix === '' ? 'address' : $prefix . 'address');
+        $legacy = input_str($legacyKey, $label, 0, 200, $required);
+        return [
+            'provided' => $structured,
+            'address' => $legacy === '' ? null : $legacy,
+            'street' => null,
+            'barangay' => null,
+            'city' => null,
+            'province' => null,
+            'region' => null,
+            'postal_code' => null,
+            'latitude' => $latitude,
+            'longitude' => $longitude,
+        ];
+    }
+
+    $city = address_find_city($cityName);
+    if ($city === null) {
+        fail('Choose a city or municipality from the service-area list.', 422, 'validation_error', ['field' => $prefix . 'city']);
+    }
+    if ($street === '') {
+        fail('Street or purok is required.', 422, 'validation_error', ['field' => $prefix . 'street']);
+    }
+    if ($barangay === '') {
+        fail('Barangay is required.', 422, 'validation_error', ['field' => $prefix . 'barangay']);
+    }
+    $canonical = null;
+    foreach ($city['barangays'] as $candidate) {
+        if (mb_strtolower((string) $candidate) === mb_strtolower($barangay)) {
+            $canonical = (string) $candidate;
+            break;
+        }
+    }
+    if ($canonical === null) {
+        fail('Choose a barangay that belongs to ' . $city['name'] . '.', 422, 'validation_error', ['field' => $prefix . 'barangay']);
+    }
+
+    $province = (string) $city['province'];
+    $region = (string) $city['region'];
+    $postal = (string) $city['postal_code'];
+    $address = implode(', ', array_filter([
+        $street,
+        $canonical,
+        (string) $city['name'],
+        trim($province . ' ' . $postal),
+    ], static fn($p) => $p !== ''));
+
+    return [
+        'provided' => true,
+        'address' => $address,
+        'street' => $street,
+        'barangay' => $canonical,
+        'city' => $city['name'],
+        'province' => $province,
+        'region' => $region,
+        'postal_code' => $postal,
+        'latitude' => $latitude,
+        'longitude' => $longitude,
+    ];
+}
+
+/** Payload fields for an address stored on the row. */
+function address_payload(array $row, string $prefix = ''): array
+{
+    return [
+        $prefix . 'street' => $row[$prefix . 'street'] ?? null,
+        $prefix . 'barangay' => $row[$prefix . 'barangay'] ?? null,
+        $prefix . 'city' => $row[$prefix . 'city'] ?? null,
+        $prefix . 'province' => $row[$prefix . 'province'] ?? null,
+        $prefix . 'region' => $row[$prefix . 'region'] ?? null,
+        $prefix . 'postal_code' => $row[$prefix . 'postal_code'] ?? null,
+        $prefix . 'latitude' => isset($row[$prefix . 'latitude']) && $row[$prefix . 'latitude'] !== null ? (float) $row[$prefix . 'latitude'] : null,
+        $prefix . 'longitude' => isset($row[$prefix . 'longitude']) && $row[$prefix . 'longitude'] !== null ? (float) $row[$prefix . 'longitude'] : null,
+    ];
+}
+
+/** Fees configured on a branch for rush and outside-zone orders. */
+function order_fee_values(array $branch, bool $rush, bool $outsideZone): array
+{
+    return [
+        'is_rush' => $rush ? 1 : 0,
+        'rush_fee' => $rush ? money($branch['rush_fee'] ?? 0) : 0.0,
+        'is_outside_zone' => $outsideZone ? 1 : 0,
+        'outside_zone_fee' => $outsideZone ? money($branch['outside_zone_fee'] ?? 0) : 0.0,
+    ];
 }

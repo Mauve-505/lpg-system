@@ -24,6 +24,10 @@ function sale_payload(array $s, array $items): array
         'payment_type' => $s['payment_type'],
         'subtotal' => (float) $s['subtotal'],
         'deposit_total' => (float) $s['deposit_total'],
+        'is_rush' => (int) ($s['is_rush'] ?? 0),
+        'rush_fee' => (float) ($s['rush_fee'] ?? 0),
+        'is_outside_zone' => (int) ($s['is_outside_zone'] ?? 0),
+        'outside_zone_fee' => (float) ($s['outside_zone_fee'] ?? 0),
         'total_amount' => (float) $s['total_amount'],
         'is_void' => (int) $s['is_void'],
         'void_reason' => $s['void_reason'],
@@ -175,7 +179,7 @@ function api_sales_create(): void
     $u = require_staff_or_owner();
     $scope = branch_scope($u, true);
     $branchId = (int) $scope['id'];
-    require_active_branch($branchId);
+    $branch = require_active_branch($branchId);
 
     $date = input_date('date', 'Sale date', false) ?: today();
     $pay = input_enum('pay', 'Payment type', ['cash', 'credit']);
@@ -189,9 +193,13 @@ function api_sales_create(): void
             fail('Customer not found or inactive.', 422, 'validation_error', ['field' => 'customer_id']);
         }
     }
+    $isRush = input_bool('is_rush', false);
+    $isOutside = input_bool('is_outside_zone', false);
+    $fees = order_fee_values($branch, $isRush, $isOutside);
+    $feeTotal = round($fees['rush_fee'] + $fees['outside_zone_fee'], 2);
 
     $items = parse_sale_items();
-    $result = tx(function () use ($u, $branchId, $date, $pay, $customerId, $items) {
+    $result = tx(function () use ($u, $branchId, $date, $pay, $customerId, $items, $fees, $feeTotal) {
         $sizeIds = array_map(static fn($x) => (int) $x['size_id'], $items);
         lock_stock($branchId, $sizeIds);
         $stock = stock_balances($branchId, $sizeIds);
@@ -209,7 +217,7 @@ function api_sales_create(): void
         unset($it);
 
         $subtotal = array_sum(array_column($items, 'line_total'));
-        $total = round($subtotal, 2);
+        $total = round($subtotal + $feeTotal, 2);
 
         if ($pay === 'credit' && $customerId !== null) {
             $cust = row('SELECT credit_limit FROM customers WHERE id=?', [$customerId]);
@@ -222,9 +230,14 @@ function api_sales_create(): void
         }
 
         q(
-            'INSERT INTO sales (branch_id, sale_date, customer_id, payment_type, subtotal, deposit_total, total_amount, created_by)
-             VALUES (?,?,?,?,?,0,?,?)',
-            [$branchId, $date, $customerId, $pay, $subtotal, $total, (int) $u['id']]
+            'INSERT INTO sales (branch_id, sale_date, customer_id, payment_type, subtotal, deposit_total,
+                is_rush, rush_fee, is_outside_zone, outside_zone_fee, total_amount, created_by)
+             VALUES (?,?,?,?,?,0,?,?,?,?,?,?)',
+            [
+                $branchId, $date, $customerId, $pay, $subtotal,
+                $fees['is_rush'], $fees['rush_fee'], $fees['is_outside_zone'], $fees['outside_zone_fee'],
+                $total, (int) $u['id'],
+            ]
         );
         $saleId = (int) db()->lastInsertId();
         q('UPDATE sales SET sale_no=? WHERE id=?', [doc_no('SALE', $date, $saleId), $saleId]);

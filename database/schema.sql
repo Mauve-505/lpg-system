@@ -19,12 +19,24 @@ CREATE TABLE IF NOT EXISTS branches (
   name VARCHAR(100) NOT NULL,
   code VARCHAR(20) NOT NULL UNIQUE,
   address VARCHAR(200) NULL,
+  street VARCHAR(160) NULL,
+  barangay VARCHAR(100) NULL,
+  city VARCHAR(100) NULL,
+  province VARCHAR(100) NULL,
+  region VARCHAR(100) NULL,
+  postal_code VARCHAR(20) NULL,
+  latitude DECIMAL(10,7) NULL,
+  longitude DECIMAL(10,7) NULL,
   contact_phone VARCHAR(40) NULL,
   service_area_notes VARCHAR(500) NULL,
   operating_hours VARCHAR(200) NULL,
   cutoff_time TIME NULL,
   max_order_qty INT NOT NULL DEFAULT 20,
+  rush_fee DECIMAL(10,2) NOT NULL DEFAULT 50,
+  outside_zone_fee DECIMAL(10,2) NOT NULL DEFAULT 0,
+  branch_admin_id INT NULL,
   is_active TINYINT(1) NOT NULL DEFAULT 1,
+  INDEX idx_branches_admin (branch_admin_id),
   created_by INT NULL,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -37,8 +49,20 @@ CREATE TABLE IF NOT EXISTS customers (
   -- branch; staff-created customers belong to the creating branch.
   branch_id INT NULL,
   name VARCHAR(100) NOT NULL,
+  first_name VARCHAR(60) NULL,
+  middle_name VARCHAR(60) NULL,
+  last_name VARCHAR(60) NULL,
+  name_suffix VARCHAR(20) NULL,
   contact VARCHAR(50) NULL,
   address VARCHAR(200) NULL,
+  street VARCHAR(160) NULL,
+  barangay VARCHAR(100) NULL,
+  city VARCHAR(100) NULL,
+  province VARCHAR(100) NULL,
+  region VARCHAR(100) NULL,
+  postal_code VARCHAR(20) NULL,
+  latitude DECIMAL(10,7) NULL,
+  longitude DECIMAL(10,7) NULL,
   credit_limit DECIMAL(10,2) NULL,
   is_reseller TINYINT(1) NOT NULL DEFAULT 0,
   reseller_status ENUM('none','pending','approved','rejected') NOT NULL DEFAULT 'none',
@@ -54,9 +78,13 @@ CREATE TABLE IF NOT EXISTS customers (
 CREATE TABLE IF NOT EXISTS users (
   id INT AUTO_INCREMENT PRIMARY KEY,
   name VARCHAR(100) NOT NULL,
+  first_name VARCHAR(60) NULL,
+  middle_name VARCHAR(60) NULL,
+  last_name VARCHAR(60) NULL,
+  name_suffix VARCHAR(20) NULL,
   username VARCHAR(50) NOT NULL UNIQUE,
   password_hash VARCHAR(255) NOT NULL,
-  role ENUM('owner','staff','customer') NOT NULL DEFAULT 'staff',
+  role ENUM('owner','branch_admin','staff','delivery','customer') NOT NULL DEFAULT 'staff',
   customer_id INT NULL,
   branch_id INT NULL,
   phone VARCHAR(40) NULL,
@@ -74,7 +102,8 @@ CREATE TABLE IF NOT EXISTS users (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 ALTER TABLE branches
-  ADD CONSTRAINT fk_branches_created_by FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL;
+  ADD CONSTRAINT fk_branches_created_by FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL,
+  ADD CONSTRAINT fk_branches_admin FOREIGN KEY (branch_admin_id) REFERENCES users(id) ON DELETE SET NULL;
 
 -- ---------------------------------------------------------------------------
 -- Security support tables
@@ -215,6 +244,10 @@ CREATE TABLE IF NOT EXISTS sales (
   payment_type ENUM('cash','credit') NOT NULL,
   subtotal DECIMAL(12,2) NOT NULL DEFAULT 0,
   deposit_total DECIMAL(12,2) NOT NULL DEFAULT 0,
+  is_rush TINYINT(1) NOT NULL DEFAULT 0,
+  rush_fee DECIMAL(10,2) NOT NULL DEFAULT 0,
+  is_outside_zone TINYINT(1) NOT NULL DEFAULT 0,
+  outside_zone_fee DECIMAL(10,2) NOT NULL DEFAULT 0,
   total_amount DECIMAL(12,2) NOT NULL DEFAULT 0,
   order_id INT NULL,
   created_by INT NOT NULL,
@@ -305,7 +338,19 @@ CREATE TABLE IF NOT EXISTS orders (
   requested_date DATE NULL,
   time_slot VARCHAR(40) NULL,
   delivery_address VARCHAR(200) NULL,
+  delivery_street VARCHAR(160) NULL,
+  delivery_barangay VARCHAR(100) NULL,
+  delivery_city VARCHAR(100) NULL,
+  delivery_province VARCHAR(100) NULL,
+  delivery_region VARCHAR(100) NULL,
+  delivery_postal_code VARCHAR(20) NULL,
+  delivery_latitude DECIMAL(10,7) NULL,
+  delivery_longitude DECIMAL(10,7) NULL,
   valve_type ENUM('snap_on','pol','na') NOT NULL DEFAULT 'na',
+  is_rush TINYINT(1) NOT NULL DEFAULT 0,
+  rush_fee DECIMAL(10,2) NOT NULL DEFAULT 0,
+  is_outside_zone TINYINT(1) NOT NULL DEFAULT 0,
+  outside_zone_fee DECIMAL(10,2) NOT NULL DEFAULT 0,
   subtotal DECIMAL(12,2) NOT NULL DEFAULT 0,
   deposit_total DECIMAL(12,2) NOT NULL DEFAULT 0,
   total_amount DECIMAL(12,2) NOT NULL DEFAULT 0,
@@ -447,6 +492,7 @@ INSERT IGNORE INTO schema_migrations (version) VALUES ('001_fresh_install');
 -- Mark migrations already included in this fresh schema so migrate.php skips them.
 INSERT IGNORE INTO schema_migrations (version) VALUES ('001_add_branches');
 INSERT IGNORE INTO schema_migrations (version) VALUES ('002_customer_home_branch');
+INSERT IGNORE INTO schema_migrations (version) VALUES ('003_structured_names_addresses_delivery');
 
 -- One lock row per branch+size so SELECT ... FOR UPDATE always finds a row.
 INSERT IGNORE INTO stock_locks (branch_id, size_id)

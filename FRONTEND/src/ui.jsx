@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useId, useRef, useState } from 'react'
-import { get, getPage, query } from './api'
+import { get, getPage, publicGet, query } from './api'
 
 export const Ctx = createContext(null)
 export const useApp = () => useContext(Ctx)
@@ -43,6 +43,279 @@ export const itemsSummary = (items = [], kind = 'sale') => {
 }
 
 export const itemsQty = (items = []) => items.reduce((n, it) => n + Number(it.qty || 0), 0)
+
+export const hasCoords = row => {
+  const lat = Number(row?.latitude)
+  const lng = Number(row?.longitude)
+  return Number.isFinite(lat) && Number.isFinite(lng) && !(lat === 0 && lng === 0)
+}
+
+/* -------------------------------------------------------------------------- */
+/* Address catalogue and person names                                         */
+/* -------------------------------------------------------------------------- */
+
+let addressCatalogPromise = null
+
+/** Public service-area catalogue: regions, provinces and cities/barangays. */
+export function useAddressCatalog() {
+  const [catalog, setCatalog] = useState(null)
+
+  useEffect(() => {
+    let live = true
+    if (!addressCatalogPromise) {
+      addressCatalogPromise = publicGet('addresses').catch(err => {
+        addressCatalogPromise = null
+        throw err
+      })
+    }
+    addressCatalogPromise
+      .then(data => { if (live) setCatalog(data) })
+      .catch(() => { if (live) setCatalog({ regions: [], provinces: [], cities: [] }) })
+    return () => { live = false }
+  }, [])
+
+  return catalog || { regions: [], provinces: [], cities: [] }
+}
+
+/**
+ * Structured person name. Stores a hidden legacy `name` when editing a record
+ * from before names were split, so untouched legacy records keep working.
+ */
+export function PersonNameFields({ value = {}, required = false, autoFocus = false }) {
+  const { tr } = useApp() || {}
+  const legacyName = value?.name || ''
+  return (
+    <div className="name-fields full">
+      {legacyName && <input type="hidden" name="name" value={legacyName} />}
+      <label>{tr ? tr('common.lastName', 'Last name') : 'Last name'}
+        <input
+          name="last_name"
+          maxLength={60}
+          defaultValue={value?.last_name || ''}
+          autoComplete="family-name"
+          required={required}
+          autoFocus={autoFocus}
+        />
+      </label>
+      <label>{tr ? tr('common.firstName', 'First name') : 'First name'}
+        <input
+          name="first_name"
+          maxLength={60}
+          defaultValue={value?.first_name || ''}
+          autoComplete="given-name"
+          required={required}
+        />
+      </label>
+      <label>{tr ? tr('common.middleName', 'Middle name') : 'Middle name'}
+        <input
+          name="middle_name"
+          maxLength={60}
+          defaultValue={value?.middle_name || ''}
+          autoComplete="additional-name"
+        />
+      </label>
+      <label>{tr ? tr('common.suffix', 'Suffix') : 'Suffix'}
+        <input name="name_suffix" maxLength={20} defaultValue={value?.name_suffix || ''} placeholder="Jr., III" autoComplete="honorific-suffix" />
+      </label>
+      <p className="hint full">
+        {tr ? tr('names.help', 'Shown as Last name, First middle name suffix.') : 'Shown as Last name, First middle name suffix.'}
+      </p>
+    </div>
+  )
+}
+
+/**
+ * Structured address with city/barangay dropdowns. When the record has no
+ * catalogue city yet, the original free-text address is shown so older records
+ * stay editable and existing tests/clients keep working.
+ */
+export function AddressFields({
+  prefix = '', value = {}, label = 'Address', required = false, idPrefix = 'addr',
+}) {
+  const { tr } = useApp() || {}
+  const catalog = useAddressCatalog()
+  const cities = catalog.cities || []
+  // New records start with the dropdowns. Records that only have the old
+  // free-text address keep it open so their existing text is not lost.
+  const [mode, setMode] = useState(() => (value?.address && !value?.city ? 'legacy' : 'structured'))
+  const [cityName, setCityName] = useState(value?.city || '')
+  const [barangay, setBarangay] = useState(value?.barangay || '')
+  const [street, setStreet] = useState(value?.street || '')
+  const [lat, setLat] = useState(value?.latitude ?? '')
+  const [lng, setLng] = useState(value?.longitude ?? '')
+  const [mapOpen, setMapOpen] = useState(false)
+  const [locating, setLocating] = useState(false)
+
+  const city = cities.find(c => c.name === cityName)
+  const barangays = city?.barangays || []
+  const coords = hasCoords({ latitude: lat, longitude: lng })
+
+  function chooseCity(name) {
+    setCityName(name)
+    setBarangay('')
+    const next = cities.find(c => c.name === name)
+    if (next && !coords) {
+      setLat(next.latitude ?? '')
+      setLng(next.longitude ?? '')
+    }
+  }
+
+  function locate() {
+    if (!navigator.geolocation) return
+    setLocating(true)
+    navigator.geolocation.getCurrentPosition(
+      pos => {
+        setLat(pos.coords.latitude.toFixed(6))
+        setLng(pos.coords.longitude.toFixed(6))
+        setLocating(false)
+        setMapOpen(true)
+      },
+      () => setLocating(false),
+      { enableHighAccuracy: true, timeout: 12000, maximumAge: 60000 },
+    )
+  }
+
+  return (
+    <div className="addr-fields full">
+      <div className="addr-toggle full">
+        <span className="addr-title">{label}</span>
+        <button
+          type="button"
+          className="ghost sm"
+          onClick={() => setMode(m => (m === 'structured' ? 'legacy' : 'structured'))}
+        >
+          {mode === 'structured'
+            ? (tr ? tr('address.typeInstead', 'Type an address instead') : 'Type an address instead')
+            : (tr ? tr('address.chooseList', 'Choose from the list') : 'Choose from the list')}
+        </button>
+      </div>
+
+      {mode === 'legacy' ? (
+        <label className="full">{label}
+          <input
+            name={prefix + 'address'}
+            maxLength={200}
+            defaultValue={value?.address || ''}
+            placeholder={tr ? tr('address.legacyPlaceholder', 'House no., street, barangay, city') : 'House no., street, barangay, city'}
+            required={required}
+            autoComplete="street-address"
+          />
+        </label>
+      ) : (
+        <>
+          <label>{tr ? tr('address.city', 'City / municipality') : 'City / municipality'}
+            <select
+              id={idPrefix + '-city'}
+              name={prefix + 'city'}
+              value={cityName}
+              onChange={e => chooseCity(e.target.value)}
+              required={required}
+            >
+              <option value="">{tr ? tr('address.chooseCity', 'Choose a city') : 'Choose a city'}</option>
+              {cities.map(c => <option key={c.name} value={c.name}>{c.name}</option>)}
+            </select>
+          </label>
+          <label>{tr ? tr('address.barangay', 'Barangay') : 'Barangay'}
+            <select
+              name={prefix + 'barangay'}
+              value={barangay}
+              onChange={e => setBarangay(e.target.value)}
+              disabled={!cityName}
+              required={required}
+            >
+              <option value="">{cityName ? (tr ? tr('address.chooseBarangay', 'Choose a barangay') : 'Choose a barangay') : '—'}</option>
+              {barangays.map(b => <option key={b} value={b}>{b}</option>)}
+            </select>
+          </label>
+          <label className="full">{tr ? tr('address.street', 'Street, purok or house no.') : 'Street, purok or house no.'}
+            <input
+              name={prefix + 'street'}
+              maxLength={160}
+              value={street}
+              onChange={e => setStreet(e.target.value)}
+              required={required}
+              autoComplete="address-line1"
+            />
+          </label>
+          <input type="hidden" name={prefix + 'latitude'} value={lat} />
+          <input type="hidden" name={prefix + 'longitude'} value={lng} />
+
+          <div className="addr-meta full">
+            <span className="hint">
+              {city
+                ? `${city.province} · ${city.region} · ${city.postal_code}`
+                : (tr ? tr('address.pickCityHint', 'Choose a city to fill province, region and postal code.') : 'Choose a city to fill province, region and postal code.')}
+            </span>
+            <span className="addr-actions">
+              <button type="button" className="ghost sm" onClick={locate} disabled={locating}>
+                {locating
+                  ? (tr ? tr('address.locating', 'Finding you…') : 'Finding you…')
+                  : (tr ? tr('address.useLocation', 'Use my location') : 'Use my location')}
+              </button>
+              {coords && (
+                <button type="button" className="ghost sm" onClick={() => setMapOpen(true)}>
+                  {tr ? tr('address.viewMap', 'View map') : 'View map'}
+                </button>
+              )}
+            </span>
+          </div>
+        </>
+      )}
+
+      {mapOpen && coords && (
+        <MapModal
+          lat={Number(lat)}
+          lng={Number(lng)}
+          title={label}
+          onClose={() => setMapOpen(false)}
+        />
+      )}
+    </div>
+  )
+}
+
+/* -------------------------------------------------------------------------- */
+/* Maps                                                                       */
+/* -------------------------------------------------------------------------- */
+
+export function MapModal({ lat, lng, title = 'Delivery location', onClose }) {
+  const latN = Number(lat)
+  const lngN = Number(lng)
+  const pad = 0.012
+  const bbox = [lngN - pad, latN - pad, lngN + pad, latN + pad].join(',')
+  const embed = 'https://www.openstreetmap.org/export/embed.html?bbox=' +
+    encodeURIComponent(bbox) + '&layer=mapnik&marker=' + encodeURIComponent(latN + ',' + lngN)
+  const google = 'https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent(latN + ',' + lngN)
+  return (
+    <Modal
+      title={title}
+      submit="Close"
+      wide
+      onClose={onClose}
+      onSubmit={async () => onClose?.()}
+    >
+      <div className="map-frame full">
+        <iframe title={title} src={embed} loading="lazy" referrerPolicy="no-referrer" />
+      </div>
+      <p className="hint full">
+        {latN.toFixed(6)}, {lngN.toFixed(6)} ·{' '}
+        <a href={google} target="_blank" rel="noreferrer">Open in Google Maps</a>
+      </p>
+    </Modal>
+  )
+}
+
+/** Small "Map" button that opens the delivery pin in a modal. */
+export function MapLink({ lat, lng, label = 'Map', title = 'Delivery location' }) {
+  const [open, setOpen] = useState(false)
+  if (!hasCoords({ latitude: lat, longitude: lng })) return null
+  return (
+    <>
+      <button type="button" className="sm link-ac" onClick={() => setOpen(true)}>{label}</button>
+      {open && <MapModal lat={lat} lng={lng} title={title} onClose={() => setOpen(false)} />}
+    </>
+  )
+}
 
 /* -------------------------------------------------------------------------- */
 /* Data loading                                                               */
@@ -144,6 +417,7 @@ export function Modal({
   const ref = useRef(null)
   const { toast } = useApp()
   const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
   const titleId = useId()
 
   useEffect(() => {
@@ -156,10 +430,15 @@ export function Modal({
     ev.preventDefault()
     if (busy) return
     setBusy(true)
+    setError('')
     try {
       await onSubmit(Object.fromEntries(new FormData(ev.currentTarget)))
     } catch (err) {
-      toast(err.message || 'Could not save.', true)
+      const message = err.message || 'Could not save.'
+      // A <dialog> lives in the top layer, so the global toast is painted
+      // behind its backdrop. Keep the failure visible inside the form too.
+      setError(message)
+      toast(message, true)
     } finally {
       setBusy(false)
     }
@@ -180,6 +459,7 @@ export function Modal({
         </header>
         <div className="fields">
           {intro && <p className="hint">{intro}</p>}
+          {error && <p className="form-error full" role="alert">{error}</p>}
           {children}
         </div>
         <footer>
@@ -242,7 +522,7 @@ const TONES = {
   delivered: 'ok', received: 'ok', cash: 'ok', active: 'ok', approved: 'info',
   pending: 'warn', requested: 'warn', credit: 'warn', in_transit: 'info',
   cancelled: 'bad', void: 'bad', inactive: 'muted',
-  owner: 'info', staff: 'info', customer: 'info',
+  owner: 'info', branch_admin: 'info', staff: 'info', delivery: 'info', customer: 'info',
 }
 
 export function Badge({ t, label }) {

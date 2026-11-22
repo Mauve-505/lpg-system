@@ -21,7 +21,7 @@ function order_payload(array $o): array
     $qtyTotal = array_sum(array_column($items, 'qty'));
     $first = $items[0] ?? null;
 
-    return [
+    return array_merge([
         'id' => (int) $o['id'],
         'order_no' => $o['order_no'] ?? null,
         'branch_id' => (int) $o['branch_id'],
@@ -39,9 +39,14 @@ function order_payload(array $o): array
         'status' => $o['status'],
         'subtotal' => (float) $o['subtotal'],
         'deposit_total' => (float) $o['deposit_total'],
+        'is_rush' => (int) ($o['is_rush'] ?? 0),
+        'rush_fee' => (float) ($o['rush_fee'] ?? 0),
+        'is_outside_zone' => (int) ($o['is_outside_zone'] ?? 0),
+        'outside_zone_fee' => (float) ($o['outside_zone_fee'] ?? 0),
         'total_amount' => (float) $o['total_amount'],
         'sale_id' => $o['sale_id'] === null ? null : (int) $o['sale_id'],
         'rider_id' => $o['rider_id'] === null ? null : (int) $o['rider_id'],
+        'rider_name' => $o['rider_name'] ?? null,
         'proof_of_delivery' => $o['proof_of_delivery'],
         'delivered_at' => $o['delivered_at'],
         'created_at' => $o['created_at'],
@@ -49,14 +54,15 @@ function order_payload(array $o): array
         // Legacy single-size fields for older clients.
         'size' => $first ? $first['size'] : null,
         'qty' => $qtyTotal,
-    ];
+    ], address_payload($o, 'delivery_'));
 }
 
 function load_order_for_user(array $u, int $id): array
 {
     $o = row(
-        'SELECT o.*, b.name branch_name, c.name customer, c.contact customer_contact
+        'SELECT o.*, b.name branch_name, c.name customer, c.contact customer_contact, r.name rider_name
          FROM orders o JOIN branches b ON b.id=o.branch_id JOIN customers c ON c.id=o.customer_id
+         LEFT JOIN users r ON r.id=o.rider_id
          WHERE o.id=?',
         [$id]
     );
@@ -71,7 +77,7 @@ function load_order_for_user(array $u, int $id): array
 
 function api_orders_list(): void
 {
-    $u = require_staff_or_owner();
+    $u = require_order_access();
     $scope = branch_scope($u);
     [$sc, $sp] = scope_sql($scope, 'o.branch_id');
     $p = pagination();
@@ -110,8 +116,9 @@ function api_orders_list(): void
         0
     );
     $st = db()->prepare(
-        'SELECT o.*, b.name branch_name, c.name customer, c.contact customer_contact
+        'SELECT o.*, b.name branch_name, c.name customer, c.contact customer_contact, r.name rider_name
          FROM orders o JOIN branches b ON b.id=o.branch_id JOIN customers c ON c.id=o.customer_id
+         LEFT JOIN users r ON r.id=o.rider_id
          WHERE ' . $where . " ORDER BY FIELD(o.status,'pending','approved','delivered','cancelled'), o.id DESC
          LIMIT ? OFFSET ?"
     );
@@ -123,7 +130,7 @@ function api_orders_list(): void
 
 function api_order_show(array $params): void
 {
-    $u = require_staff_or_owner();
+    $u = require_order_access();
     $o = load_order_for_user($u, (int) $params[0]);
     json_response(order_payload($o));
 }
@@ -223,9 +230,26 @@ function delivery_empties(array $items): array
     return $map;
 }
 
+/** Validate a rider that belongs to the order branch (owner may ride any). */
+function order_rider_row(int $riderId, int $branchId): array
+{
+    $rider = row(
+        "SELECT id, role, branch_id FROM users
+         WHERE id=? AND is_active=1 AND role IN ('staff','branch_admin','delivery','owner')",
+        [$riderId]
+    );
+    if (!$rider) {
+        fail('Rider not found.', 422, 'validation_error', ['field' => 'rider_id']);
+    }
+    if ($rider['role'] !== 'owner' && (int) $rider['branch_id'] !== $branchId) {
+        fail('Choose a rider from this order branch.', 422, 'validation_error', ['field' => 'rider_id']);
+    }
+    return $rider;
+}
+
 function api_order_deliver(array $params): void
 {
-    $u = require_staff_or_owner();
+    $u = require_order_access();
     $orderId = (int) $params[0];
     $proof = input_str('proof_of_delivery', 'Proof of delivery', 0, 255, false);
     $riderId = body_value('rider_id') !== null && body_value('rider_id') !== ''
@@ -247,11 +271,14 @@ function api_order_deliver(array $params): void
             fail('Order has no items.', 409, 'empty_order');
         }
 
-        if ($riderId !== null) {
-            $rider = row('SELECT id FROM users WHERE id=? AND is_active=1 AND role IN (\'staff\',\'owner\')', [$riderId]);
-            if (!$rider) {
-                fail('Rider not found.', 422, 'validation_error', ['field' => 'rider_id']);
+        if ($u['role'] === 'delivery') {
+            if ($riderId !== null && $riderId !== (int) $u['id']) {
+                fail('Delivery riders can only deliver as themselves.', 403, 'forbidden');
             }
+            $riderId = (int) $u['id'];
+        }
+        if ($riderId !== null) {
+            order_rider_row($riderId, (int) $o['branch_id']);
         }
 
         $sizeIds = array_map(static fn($x) => (int) $x['size_id'], $items);
@@ -279,12 +306,19 @@ function api_order_deliver(array $params): void
             $subtotal += (int) $it['qty'] * (float) $it['unit_price'];
             $deposit += (float) $it['deposit_amount'];
         }
-        $total = round($subtotal + $deposit, 2);
+        $rushFee = money($o['rush_fee'] ?? 0);
+        $outsideFee = money($o['outside_zone_fee'] ?? 0);
+        $total = round($subtotal + $deposit + $rushFee + $outsideFee, 2);
 
         q(
-            'INSERT INTO sales (branch_id, sale_date, customer_id, payment_type, subtotal, deposit_total, total_amount, order_id, created_by)
-             VALUES (?,?,?,?,?,?,?,?,?)',
-            [(int) $o['branch_id'], $date, (int) $o['customer_id'], $o['payment_type'], $subtotal, $deposit, $total, $orderId, (int) $u['id']]
+            'INSERT INTO sales (branch_id, sale_date, customer_id, payment_type, subtotal, deposit_total,
+                is_rush, rush_fee, is_outside_zone, outside_zone_fee, total_amount, order_id, created_by)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
+            [
+                (int) $o['branch_id'], $date, (int) $o['customer_id'], $o['payment_type'], $subtotal, $deposit,
+                (int) ($o['is_rush'] ?? 0), $rushFee, (int) ($o['is_outside_zone'] ?? 0), $outsideFee,
+                $total, $orderId, (int) $u['id'],
+            ]
         );
         $saleId = (int) db()->lastInsertId();
         q('UPDATE sales SET sale_no=? WHERE id=?', [doc_no('SALE', $date, $saleId), $saleId]);
@@ -321,18 +355,21 @@ function api_order_deliver(array $params): void
 
 function api_order_assign(array $params): void
 {
-    $u = require_staff_or_owner();
+    $u = require_order_access();
     $orderId = (int) $params[0];
     $riderId = input_int('rider_id', 'Rider', 1, null, false);
     $o = load_order_for_user($u, $orderId);
     if (!in_array($o['status'], ['pending', 'approved'], true)) {
         fail('Only open orders can be assigned.', 409, 'order_locked');
     }
-    if ($riderId !== null) {
-        $rider = row("SELECT id FROM users WHERE id=? AND is_active=1 AND role IN ('staff','owner')", [$riderId]);
-        if (!$rider) {
-            fail('Rider not found.', 422, 'validation_error', ['field' => 'rider_id']);
+    if ($u['role'] === 'delivery') {
+        if ($riderId !== null && $riderId !== (int) $u['id']) {
+            fail('Delivery riders can only assign themselves.', 403, 'forbidden');
         }
+        $riderId = (int) $u['id'];
+    }
+    if ($riderId !== null) {
+        order_rider_row($riderId, (int) $o['branch_id']);
     }
     q('UPDATE orders SET rider_id=? WHERE id=?', [$riderId, $orderId]);
     audit($u, 'assign', 'order', $orderId, ['rider_id' => $o['rider_id']], ['rider_id' => $riderId], (int) $o['branch_id']);

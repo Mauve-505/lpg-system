@@ -5,9 +5,19 @@ declare(strict_types=1);
  * Branch administration (owner only) and per-branch price lists.
  */
 
+/** Standard same-day rush add-on when a branch does not choose its own fee. */
+const BRANCH_DEFAULT_RUSH_FEE = 50.0;
+
 function branch_payload(array $b): array
 {
-    return [
+    $admin = null;
+    if (!empty($b['branch_admin_id'])) {
+        $admin = row('SELECT id, name, username FROM users WHERE id=?', [(int) $b['branch_admin_id']]);
+        if ($admin) {
+            $admin['id'] = (int) $admin['id'];
+        }
+    }
+    return array_merge([
         'id' => (int) $b['id'],
         'name' => $b['name'],
         'code' => $b['code'],
@@ -17,9 +27,13 @@ function branch_payload(array $b): array
         'operating_hours' => $b['operating_hours'],
         'cutoff_time' => $b['cutoff_time'] === null ? null : substr((string) $b['cutoff_time'], 0, 5),
         'max_order_qty' => (int) $b['max_order_qty'],
+        'rush_fee' => (float) ($b['rush_fee'] ?? 0),
+        'outside_zone_fee' => (float) ($b['outside_zone_fee'] ?? 0),
+        'branch_admin_id' => empty($b['branch_admin_id']) ? null : (int) $b['branch_admin_id'],
+        'branch_admin' => $admin,
         'is_active' => (int) $b['is_active'],
         'created_at' => $b['created_at'] ?? null,
-    ];
+    ], address_payload($b));
 }
 
 function branch_code(string $raw, ?int $exceptId = null): string
@@ -50,12 +64,14 @@ function branch_input(): array
 {
     return [
         'name' => input_str('name', 'Branch name', 2, 100),
-        'address' => input_str('address', 'Address', 0, 200, false),
+        'address' => address_input('', 'Address', false),
         'contact_phone' => input_str('contact_phone', 'Contact number', 0, 40, false),
         'service_area_notes' => input_str('service_area_notes', 'Service area notes', 0, 500, false),
         'operating_hours' => input_str('operating_hours', 'Operating hours', 0, 200, false),
         'cutoff_time' => branch_time(query_body_str('cutoff_time', 10)),
         'max_order_qty' => input_int('max_order_qty', 'Maximum cylinders per order', 1, 500, false) ?? 20,
+        'rush_fee' => input_decimal('rush_fee', 'Rush order fee', 0, 100000, false),
+        'outside_zone_fee' => input_decimal('outside_zone_fee', 'Outside-zone fee', 0, 100000, false),
     ];
 }
 
@@ -83,7 +99,7 @@ function api_branches_list(): void
         $id = (int) $b['id'];
         $payload = branch_payload($b);
         $payload['staff_count'] = (int) val(
-            "SELECT COUNT(*) FROM users WHERE branch_id=? AND role='staff' AND is_active=1",
+            "SELECT COUNT(*) FROM users WHERE branch_id=? AND role IN ('branch_admin','staff','delivery') AND is_active=1",
             [$id],
             0
         );
@@ -125,17 +141,20 @@ function api_branches_create(): void
     $code = branch_code(query_body_str('code', 20) ?? '');
 
     $id = tx(function () use ($u, $data, $code) {
+        $a = $data['address'];
         q(
-            'INSERT INTO branches (name, code, address, contact_phone, service_area_notes, operating_hours,
-                cutoff_time, max_order_qty, is_active, created_by)
-             VALUES (?,?,?,?,?,?,?,?,1,?)',
+            'INSERT INTO branches (name, code, address, street, barangay, city, province, region, postal_code,
+                latitude, longitude, contact_phone, service_area_notes, operating_hours, cutoff_time,
+                max_order_qty, rush_fee, outside_zone_fee, is_active, created_by)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?)',
             [
-                $data['name'], $code,
-                $data['address'] === '' ? null : $data['address'],
+                $data['name'], $code, $a['address'], $a['street'], $a['barangay'], $a['city'],
+                $a['province'], $a['region'], $a['postal_code'], $a['latitude'], $a['longitude'],
                 $data['contact_phone'] === '' ? null : $data['contact_phone'],
                 $data['service_area_notes'] === '' ? null : $data['service_area_notes'],
                 $data['operating_hours'] === '' ? null : $data['operating_hours'],
-                $data['cutoff_time'], $data['max_order_qty'], (int) $u['id'],
+                $data['cutoff_time'], $data['max_order_qty'],
+                $data['rush_fee'] ?? BRANCH_DEFAULT_RUSH_FEE, $data['outside_zone_fee'] ?? 0, (int) $u['id'],
             ]
         );
         $id = (int) db()->lastInsertId();
@@ -160,16 +179,28 @@ function api_branches_update(array $params): void
     $data = branch_input();
     $code = branch_code(query_body_str('code', 20) ?? (string) $b['code'], $id);
 
+    // Patch semantics for address and fees: keep stored values when omitted.
+    $a = address_provided()
+        ? $data['address']
+        : [
+            'address' => $b['address'], 'street' => $b['street'], 'barangay' => $b['barangay'],
+            'city' => $b['city'], 'province' => $b['province'], 'region' => $b['region'],
+            'postal_code' => $b['postal_code'], 'latitude' => $b['latitude'], 'longitude' => $b['longitude'],
+        ];
+    $rushFee = $data['rush_fee'] !== null ? $data['rush_fee'] : (float) ($b['rush_fee'] ?? 0);
+    $outsideFee = $data['outside_zone_fee'] !== null ? $data['outside_zone_fee'] : (float) ($b['outside_zone_fee'] ?? 0);
+
     q(
-        'UPDATE branches SET name=?, code=?, address=?, contact_phone=?, service_area_notes=?,
-            operating_hours=?, cutoff_time=?, max_order_qty=? WHERE id=?',
+        'UPDATE branches SET name=?, code=?, address=?, street=?, barangay=?, city=?, province=?, region=?,
+            postal_code=?, latitude=?, longitude=?, contact_phone=?, service_area_notes=?,
+            operating_hours=?, cutoff_time=?, max_order_qty=?, rush_fee=?, outside_zone_fee=? WHERE id=?',
         [
-            $data['name'], $code,
-            $data['address'] === '' ? null : $data['address'],
+            $data['name'], $code, $a['address'], $a['street'], $a['barangay'], $a['city'],
+            $a['province'], $a['region'], $a['postal_code'], $a['latitude'], $a['longitude'],
             $data['contact_phone'] === '' ? null : $data['contact_phone'],
             $data['service_area_notes'] === '' ? null : $data['service_area_notes'],
             $data['operating_hours'] === '' ? null : $data['operating_hours'],
-            $data['cutoff_time'], $data['max_order_qty'], $id,
+            $data['cutoff_time'], $data['max_order_qty'], $rushFee, $outsideFee, $id,
         ]
     );
     audit($u, 'update', 'branch', $id,
@@ -209,9 +240,13 @@ function api_branches_deactivate(array $params): void
             $parts = array_map(static fn($s) => size_label((int) $s['size_id']) . ': ' . (int) $s['full_qty'] . ' full / ' . (int) $s['empty_qty'] . ' empty', $work['stock']);
             fail('This branch still has stock. Transfer or adjust it to zero first.', 409, 'branch_has_stock', ['stock' => $parts]);
         }
-        $staff = (int) val("SELECT COUNT(*) FROM users WHERE branch_id=? AND role='staff' AND is_active=1", [$id], 0);
-        if ($staff > 0) {
-            fail('Reassign the ' . $staff . ' active staff member(s) before deactivating this branch.', 409, 'branch_has_staff', ['staff' => $staff]);
+        $team = (int) val(
+            "SELECT COUNT(*) FROM users WHERE branch_id=? AND role IN ('branch_admin','staff','delivery') AND is_active=1",
+            [$id],
+            0
+        );
+        if ($team > 0) {
+            fail('Reassign the ' . $team . ' active branch team member(s) before deactivating this branch.', 409, 'branch_has_staff', ['staff' => $team]);
         }
 
         q('UPDATE branches SET is_active=0 WHERE id=?', [$id]);
@@ -311,4 +346,115 @@ function api_branch_prices_put(array $params): void
     });
     audit($u, 'update', 'branch_prices', $id, ['prices' => $before], ['prices' => $clean], $id);
     json_response(['ok' => 1, 'updated' => count($clean)]);
+}
+
+
+/** Branch team: admin, staff and delivery riders for one branch. */
+function api_branch_team(array $params): void
+{
+    $u = require_auth();
+    $id = (int) $params[0];
+    $b = require_branch_access($u, $id);
+    $members = rows(
+        "SELECT id, name, first_name, middle_name, last_name, name_suffix, username, role,
+                phone, is_active, last_login_at
+         FROM users
+         WHERE branch_id=? AND role IN ('branch_admin','staff','delivery')
+         ORDER BY FIELD(role,'branch_admin','staff','delivery'), name",
+        [$id]
+    );
+    foreach ($members as &$m) {
+        $m['id'] = (int) $m['id'];
+        $m['is_active'] = (int) $m['is_active'];
+        $m['is_rider'] = $m['role'] === 'delivery';
+    }
+    unset($m);
+    json_response([
+        'branch' => branch_payload($b),
+        'members' => $members,
+    ]);
+}
+
+/**
+ * Assign or create the branch admin. The owner or this branch's own admin can
+ * do it. The previous admin is demoted to staff so a branch never has two
+ * linked admins. Owners are rejected.
+ */
+function api_branch_set_admin(array $params): void
+{
+    $id = (int) $params[0];
+    $u = require_branch_manager($id);
+    require_active_branch($id);
+    $userId = input_int('user_id', 'User', 1, null, false);
+
+    $result = tx(function () use ($id, $userId, $u) {
+        $branch = row('SELECT * FROM branches WHERE id=? FOR UPDATE', [$id]);
+        if (!$branch) {
+            fail('Branch not found.', 404, 'not_found');
+        }
+        $previous = empty($branch['branch_admin_id']) ? null : (int) $branch['branch_admin_id'];
+        $temporary = null;
+
+        if ($userId !== null) {
+            $target = row('SELECT * FROM users WHERE id=?', [$userId]);
+            if (!$target) {
+                fail('User not found.', 404, 'not_found');
+            }
+            if ($target['role'] === 'owner') {
+                fail('The owner cannot be a branch admin.', 409, 'invalid_role_change');
+            }
+            if ((int) $target['is_active'] !== 1) {
+                fail('Activate the user before making them a branch admin.', 409, 'user_inactive');
+            }
+            if ($u['role'] !== 'owner' && (int) ($target['branch_id'] ?? 0) !== $id) {
+                fail('You can only choose a team member from your own branch.', 403, 'branch_forbidden');
+            }
+            // Drop any stale link from another branch before re-pointing this user.
+            q('UPDATE branches SET branch_admin_id=NULL WHERE branch_admin_id=? AND id<>?', [$userId, $id]);
+            // Re-saving the same admin must not revoke their own session.
+            $alreadyAdmin = $target['role'] === 'branch_admin' && (int) ($target['branch_id'] ?? 0) === $id;
+            q(
+                'UPDATE users SET role=?, branch_id=?, session_version=session_version+? WHERE id=?',
+                ['branch_admin', $id, $alreadyAdmin ? 0 : 1, $userId]
+            );
+            $adminId = $userId;
+        } else {
+            $person = person_name_input();
+            $username = input_str('username', 'Username', 3, 30, true, '/^[A-Za-z0-9_.-]+$/');
+            $password = (string) body_value('password', '');
+            $min = (int) config('security.password_min_length', 8);
+            if (strlen($password) < $min) {
+                fail('Password must be at least ' . $min . ' characters.', 422, 'validation_error', ['field' => 'password']);
+            }
+            $contact = input_str('contact', 'Contact number', 0, 50, false);
+            if (val('SELECT id FROM users WHERE username=?', [$username])) {
+                fail('That username is already taken.', 409, 'username_taken');
+            }
+            q(
+                "INSERT INTO users (name, first_name, middle_name, last_name, name_suffix,
+                    username, password_hash, role, branch_id, phone, must_change_password)
+                 VALUES (?,?,?,?,?,?,?,'branch_admin',?,?,0)",
+                [
+                    $person['name'], $person['first_name'], $person['middle_name'], $person['last_name'], $person['name_suffix'],
+                    $username, hash_password($password), $id, $contact === '' ? null : $contact,
+                ]
+            );
+            $adminId = (int) db()->lastInsertId();
+        }
+
+        if ($previous !== null && $previous !== $adminId) {
+            q(
+                "UPDATE users SET role='staff', session_version=session_version+1
+                 WHERE id=? AND role='branch_admin'",
+                [$previous]
+            );
+        }
+        q('UPDATE branches SET branch_admin_id=? WHERE id=?', [$adminId, $id]);
+        return ['admin_id' => $adminId, 'previous' => $previous, 'temporary_password' => $temporary];
+    });
+
+    audit($u, 'set_admin', 'branch', $id, ['branch_admin_id' => $result['previous']], ['branch_admin_id' => $result['admin_id']], $id);
+    $payload = branch_payload(branch_row($id));
+    $payload['temporary_password'] = $result['temporary_password'];
+    json_response($payload);
 }

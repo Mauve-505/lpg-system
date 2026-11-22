@@ -34,7 +34,7 @@ function api_login(): void
         fail('Wrong username or password.', 401, 'invalid_credentials');
     }
 
-    if ($u['role'] === 'staff') {
+    if (in_array($u['role'], ['branch_admin', 'staff', 'delivery'], true)) {
         $b = $u['branch_id'] ? branch_row((int) $u['branch_id']) : null;
         if (!$b || (int) $b['is_active'] !== 1) {
             record_attempt('login', $username, false);
@@ -71,10 +71,11 @@ function api_logout(): void
 function api_register(): void
 {
     check_rate_limit('signup', null);
-    $name = input_str('name', 'Full name', 2, 100);
+    $person = person_name_input();
+    $name = $person['name'];
     $username = input_str('username', 'Username', 3, 30, true, '/^[A-Za-z0-9_.-]+$/');
     $contact = input_str('contact', 'Mobile number', 7, 40, true, '/^[0-9+()\-\s]+$/');
-    $address = input_str('address', 'Delivery address', 5, 200);
+    $address = address_input('', 'Delivery address', true);
     $password = (string) body_value('password', '');
     $min = (int) config('security.password_min_length', 8);
     if (strlen($password) < $min) {
@@ -99,13 +100,26 @@ function api_register(): void
     }
 
     try {
-        $userId = tx(function () use ($name, $contact, $address, $username, $password) {
-            q('INSERT INTO customers (name, contact, address) VALUES (?,?,?)', [$name, $contact, $address]);
+        $userId = tx(function () use ($person, $contact, $address, $username, $password) {
+            q(
+                'INSERT INTO customers (name, first_name, middle_name, last_name, name_suffix,
+                    contact, address, street, barangay, city, province, region, postal_code, latitude, longitude)
+                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                [
+                    $person['name'], $person['first_name'], $person['middle_name'], $person['last_name'], $person['name_suffix'],
+                    $contact, $address['address'], $address['street'], $address['barangay'], $address['city'],
+                    $address['province'], $address['region'], $address['postal_code'], $address['latitude'], $address['longitude'],
+                ]
+            );
             $cid = (int) db()->lastInsertId();
             q(
-                "INSERT INTO users (name, username, password_hash, role, customer_id, phone, must_change_password)
-                 VALUES (?,?,?,'customer',?,?,0)",
-                [$name, $username, hash_password($password), $cid, $contact]
+                "INSERT INTO users (name, first_name, middle_name, last_name, name_suffix,
+                    username, password_hash, role, customer_id, phone, must_change_password)
+                 VALUES (?,?,?,?,?,?,?,'customer',?,?,0)",
+                [
+                    $person['name'], $person['first_name'], $person['middle_name'], $person['last_name'], $person['name_suffix'],
+                    $username, hash_password($password), $cid, $contact,
+                ]
             );
             return ['uid' => (int) db()->lastInsertId(), 'cid' => $cid];
         });
@@ -149,7 +163,7 @@ function api_me(): void
     $u = require_auth();
     $payload = public_user($u);
     // Let the app show the branch name without a second round trip.
-    if ($u['role'] === 'staff') {
+    if (in_array($u['role'], ['branch_admin', 'staff', 'delivery'], true)) {
         $payload['branch_name'] = $u['branch_name'];
     }
     json_response($payload);
@@ -196,12 +210,15 @@ function api_change_password(): void
 function api_branches_public(): void
 {
     $rows = rows(
-        'SELECT id, name, code, address, contact_phone, service_area_notes, operating_hours
+        'SELECT id, name, code, address, contact_phone, service_area_notes, operating_hours,
+                rush_fee, outside_zone_fee
          FROM branches WHERE is_active=1 ORDER BY name'
     );
     json_response(array_map(static function ($b) {
         $b['id'] = (int) $b['id'];
-        return $b;
+        $b['rush_fee'] = (float) ($b['rush_fee'] ?? 0);
+        $b['outside_zone_fee'] = (float) ($b['outside_zone_fee'] ?? 0);
+        return array_merge($b, address_payload($b));
     }, $rows));
 }
 
@@ -214,7 +231,7 @@ function api_sizes_list(): void
     if ($branchId === null) {
         $u = current_user();
         if ($u !== null) {
-            if ($u['role'] === 'staff' && $u['branch_id'] !== null) {
+            if (in_array($u['role'], ['branch_admin', 'staff', 'delivery'], true) && $u['branch_id'] !== null) {
                 $branchId = (int) $u['branch_id'];
             } elseif ($u['role'] === 'owner') {
                 $raw = trim((string) ($_SERVER['HTTP_X_BRANCH_ID'] ?? ''));

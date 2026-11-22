@@ -147,7 +147,8 @@ function current_user(bool $refresh = false): ?array
     }
 
     $u = row(
-        'SELECT u.id, u.name, u.username, u.role, u.customer_id, u.branch_id,
+        'SELECT u.id, u.name, u.first_name, u.middle_name, u.last_name, u.name_suffix,
+                u.username, u.role, u.customer_id, u.branch_id,
                 u.phone_verified, u.must_change_password, u.session_version, u.is_active,
                 b.name AS branch_name, b.is_active AS branch_active,
                 c.name AS customer_name, c.is_active AS customer_active,
@@ -167,11 +168,11 @@ function current_user(bool $refresh = false): ?array
         destroy_session();
         return null;
     }
-    if (!in_array($u['role'], ['owner', 'staff', 'customer'], true)) {
+    if (!in_array($u['role'], ['owner', 'branch_admin', 'staff', 'delivery', 'customer'], true)) {
         destroy_session();
         return null;
     }
-    if ($u['role'] === 'staff') {
+    if (in_array($u['role'], ['branch_admin', 'staff', 'delivery'], true)) {
         if (empty($u['branch_id']) || (int) $u['branch_active'] !== 1) {
             destroy_session();
             return null;
@@ -222,9 +223,31 @@ function require_owner(): array
     return require_role(['owner']);
 }
 
+/**
+ * Owner, or the branch admin responsible for this branch. Used for team
+ * management so a branch admin can run their own branch only.
+ */
+function require_branch_manager(int $branchId): array
+{
+    $u = require_auth();
+    if ($u['role'] === 'owner') {
+        return $u;
+    }
+    if ($u['role'] === 'branch_admin' && (int) $u['branch_id'] === $branchId) {
+        return $u;
+    }
+    fail('Only the owner or this branch\'s admin can manage its team.', 403, 'forbidden');
+}
+
 function require_staff_or_owner(): array
 {
-    return require_role(['owner', 'staff']);
+    return require_role(['owner', 'branch_admin', 'staff']);
+}
+
+/** Order operations, including the delivery rider role. */
+function require_order_access(): array
+{
+    return require_role(['owner', 'branch_admin', 'staff', 'delivery']);
 }
 
 function require_customer(): array
@@ -243,7 +266,7 @@ function branch_scope(?array $user = null, bool $forWrite = false): array
 {
     $user = $user ?: require_auth();
 
-    if ($user['role'] === 'staff') {
+    if (in_array($user['role'], ['branch_admin', 'staff', 'delivery'], true)) {
         $b = branch_row((int) $user['branch_id']);
         if (!$b || (int) $b['is_active'] !== 1) {
             fail('Your branch is inactive. Contact the owner.', 409, 'branch_inactive');
@@ -297,7 +320,7 @@ function can_access_branch(array $user, int $branchId): bool
     if ($user['role'] === 'owner') {
         return branch_exists($branchId);
     }
-    if ($user['role'] === 'staff') {
+    if (in_array($user['role'], ['branch_admin', 'staff', 'delivery'], true)) {
         return (int) $user['branch_id'] === $branchId;
     }
     return false;
@@ -447,6 +470,10 @@ function public_user(array $u): array
     return [
         'id' => (int) $u['id'],
         'name' => $u['name'],
+        'first_name' => $u['first_name'] ?? null,
+        'middle_name' => $u['middle_name'] ?? null,
+        'last_name' => $u['last_name'] ?? null,
+        'name_suffix' => $u['name_suffix'] ?? null,
         'username' => $u['username'],
         'role' => $u['role'],
         'customer_id' => $u['customer_id'],

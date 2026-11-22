@@ -44,8 +44,10 @@ function api_dashboard(): void
     $unpaid = (float) val(
         "SELECT COALESCE((SELECT SUM(i.line_total) FROM sales s JOIN sale_items i ON i.sale_id=s.id
                           WHERE s.is_void=0 AND s.payment_type='credit'{$scSales}),0)
+              + COALESCE((SELECT SUM(s.rush_fee + s.outside_zone_fee) FROM sales s
+                          WHERE s.is_void=0 AND s.payment_type='credit'{$scSales}),0)
               - COALESCE((SELECT SUM(p.amount) FROM payments p WHERE p.is_void=0{$scPay}),0)",
-        array_merge($spSales, $spPay),
+        array_merge($spSales, $spSales, $spPay),
         0
     );
     $empties = (int) val(

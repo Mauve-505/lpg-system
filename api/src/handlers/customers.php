@@ -4,7 +4,7 @@ declare(strict_types=1);
 function customer_payload(array $c, ?int $branchId): array
 {
     $bal = customer_balance((int) $c['id'], $branchId);
-    return [
+    return array_merge([
         'id' => (int) $c['id'],
         'branch_id' => $c['branch_id'] === null ? null : (int) $c['branch_id'],
         'name' => $c['name'],
@@ -17,7 +17,7 @@ function customer_payload(array $c, ?int $branchId): array
         'username' => $c['username'] ?? null,
         'balance' => $bal['balance'],
         'empties_owed' => $bal['empties_owed'],
-    ];
+    ], person_name_payload($c), address_payload($c));
 }
 
 /**
@@ -31,7 +31,7 @@ function can_manage_customer(array $u, array $c): bool
     if ($u['role'] === 'owner') {
         return true;
     }
-    if ($u['role'] !== 'staff') {
+    if (!in_array($u['role'], ['branch_admin', 'staff'], true)) {
         return false;
     }
     $branchId = (int) $u['branch_id'];
@@ -60,15 +60,17 @@ function api_customers_list(): void
         $where .= ' AND c.is_active=1';
     }
     if ($p['q'] !== '') {
-        $where .= ' AND (c.name LIKE ? OR c.contact LIKE ? OR c.address LIKE ?)';
+        $where .= ' AND (c.name LIKE ? OR c.contact LIKE ? OR c.address LIKE ? OR c.barangay LIKE ? OR c.city LIKE ?)';
         $like = '%' . $p['q'] . '%';
         $params[] = $like;
         $params[] = $like;
         $params[] = $like;
+        $params[] = $like;
+        $params[] = $like;
     }
-    // Staff only see customers who belong to their branch or have transacted
-    // with it. Owner sees all.
-    if ($u['role'] === 'staff') {
+    // Branch users only see customers who belong to their branch or have
+    // transacted with it. Owner sees all.
+    if (in_array($u['role'], ['branch_admin', 'staff'], true)) {
         $where .= ' AND (c.branch_id=?
                      OR EXISTS (SELECT 1 FROM sales s WHERE s.customer_id=c.id AND s.branch_id=?)
                      OR EXISTS (SELECT 1 FROM orders o WHERE o.customer_id=c.id AND o.branch_id=?)
@@ -95,17 +97,26 @@ function api_customers_create(): void
 {
     $u = require_staff_or_owner();
     $scope = branch_scope($u, true);
-    $name = input_str('name', 'Customer name', 2, 100);
+    $person = person_name_input();
+    $name = $person['name'];
     $contact = input_str('contact', 'Contact number', 0, 50, false);
-    $address = input_str('address', 'Address', 0, 200, false);
+    $address = address_input('', 'Address', false);
     $creditLimit = input_decimal('credit_limit', 'Credit limit', 0, 10000000, false);
     $isReseller = input_bool('is_reseller', false);
     $resellerStatus = input_enum('reseller_status', 'Reseller status', ['none', 'pending', 'approved', 'rejected'], false) ?: 'none';
     $branchId = (int) $scope['id'];
 
     q(
-        'INSERT INTO customers (branch_id, name, contact, address, credit_limit, is_reseller, reseller_status) VALUES (?,?,?,?,?,?,?)',
-        [$branchId, $name, $contact === '' ? null : $contact, $address === '' ? null : $address, $creditLimit, $isReseller ? 1 : 0, $resellerStatus]
+        'INSERT INTO customers (branch_id, name, first_name, middle_name, last_name, name_suffix,
+            contact, address, street, barangay, city, province, region, postal_code, latitude, longitude,
+            credit_limit, is_reseller, reseller_status)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+        [
+            $branchId, $name, $person['first_name'], $person['middle_name'], $person['last_name'], $person['name_suffix'],
+            $contact === '' ? null : $contact, $address['address'], $address['street'], $address['barangay'],
+            $address['city'], $address['province'], $address['region'], $address['postal_code'],
+            $address['latitude'], $address['longitude'], $creditLimit, $isReseller ? 1 : 0, $resellerStatus,
+        ]
     );
     $id = (int) db()->lastInsertId();
     audit($u, 'create', 'customer', $id, null, ['name' => $name, 'branch_id' => $branchId], $branchId);
@@ -123,9 +134,25 @@ function api_customers_update(array $params): void
     if (!can_manage_customer($u, $c)) {
         fail('You do not have access to that customer.', 403, 'branch_forbidden');
     }
-    $name = input_str('name', 'Customer name', 2, 100);
+    $person = person_name_input();
+    $name = $person['name'];
     $contact = input_str('contact', 'Contact number', 0, 50, false);
-    $address = input_str('address', 'Address', 0, 200, false);
+    // Patch semantics: keep the stored address unless the client sent one.
+    if (address_provided()) {
+        $address = address_input('', 'Address', false);
+    } else {
+        $address = [
+            'address' => $c['address'],
+            'street' => $c['street'],
+            'barangay' => $c['barangay'],
+            'city' => $c['city'],
+            'province' => $c['province'],
+            'region' => $c['region'],
+            'postal_code' => $c['postal_code'],
+            'latitude' => $c['latitude'],
+            'longitude' => $c['longitude'],
+        ];
+    }
     // Patch semantics: only touch the credit limit when the field was sent.
     $body = read_json_body();
     $creditLimit = array_key_exists('credit_limit', $body)
@@ -145,8 +172,15 @@ function api_customers_update(array $params): void
     }
 
     q(
-        'UPDATE customers SET branch_id=?, name=?, contact=?, address=?, credit_limit=?, is_reseller=?, reseller_status=? WHERE id=?',
-        [$homeBranchId, $name, $contact === '' ? null : $contact, $address === '' ? null : $address, $creditLimit, $isReseller ? 1 : 0, $resellerStatus, $id]
+        'UPDATE customers SET branch_id=?, name=?, first_name=?, middle_name=?, last_name=?, name_suffix=?,
+            contact=?, address=?, street=?, barangay=?, city=?, province=?, region=?, postal_code=?,
+            latitude=?, longitude=?, credit_limit=?, is_reseller=?, reseller_status=? WHERE id=?',
+        [
+            $homeBranchId, $name, $person['first_name'], $person['middle_name'], $person['last_name'], $person['name_suffix'],
+            $contact === '' ? null : $contact, $address['address'], $address['street'], $address['barangay'],
+            $address['city'], $address['province'], $address['region'], $address['postal_code'],
+            $address['latitude'], $address['longitude'], $creditLimit, $isReseller ? 1 : 0, $resellerStatus, $id,
+        ]
     );
     audit(
         $u,

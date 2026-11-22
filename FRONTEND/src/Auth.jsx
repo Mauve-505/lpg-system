@@ -2,7 +2,8 @@ import { useState } from 'react'
 import { Link, Navigate } from 'react-router-dom'
 import { ArrowLeft, Check, Flame, ShieldCheck } from 'lucide-react'
 import { post } from './api'
-import { LangToggle, useApp } from './ui'
+import { AddressFields, LangToggle, PersonNameFields, useApp } from './ui'
+import { addressBody } from './forms'
 import { SITE } from './site/content'
 
 const POINTS = [
@@ -30,7 +31,16 @@ export default function Auth({ mode }) {
     setBusy(true)
     try {
       const body = signup
-        ? { name: f.name, username: f.username, contact: f.contact, address: f.address, password: f.password }
+        ? {
+            first_name: f.first_name,
+            middle_name: f.middle_name,
+            last_name: f.last_name,
+            name_suffix: f.name_suffix,
+            username: f.username,
+            contact: f.contact,
+            ...addressBody(f),
+            password: f.password,
+          }
         : { username: f.username, password: f.password }
       const user = await post(signup ? 'register' : 'login', body)
       setMe(user)
@@ -73,11 +83,7 @@ export default function Auth({ mode }) {
 
           {error && <p className="form-error" role="alert">{error}</p>}
 
-          {signup && (
-            <label>{tr('auth.fullName')}
-              <input name="name" autoComplete="name" maxLength={100} required autoFocus />
-            </label>
-          )}
+          {signup && <PersonNameFields value={{}} required autoFocus />}
           <label>{tr('auth.username')}
             <input
               name="username"
@@ -95,9 +101,7 @@ export default function Auth({ mode }) {
               <label>{tr('auth.mobile')}
                 <input name="contact" inputMode="tel" autoComplete="tel" maxLength={40} required />
               </label>
-              <label>{tr('auth.address')}
-                <input name="address" autoComplete="street-address" maxLength={200} required />
-              </label>
+              <AddressFields value={{}} label={tr('auth.address')} required idPrefix="signup-address" />
             </>
           )}
           <label>{tr('auth.password')}{signup && ' (8+ characters)'}

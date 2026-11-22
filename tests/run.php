@@ -466,6 +466,7 @@ try {
     $northId = (int) ($r['json']['id'] ?? 0);
     check($northId > 0, 'new branch has an id');
     check(($r['json']['code'] ?? '') === 'NORTH', 'branch code is normalised to uppercase');
+    check(abs((float) ($r['json']['rush_fee'] ?? -1) - 50.0) < 0.001, 'new branches default to the standard ₱50 rush fee');
 
     $r = $owner->request('POST', '/api/branches', ['name' => 'Duplicate', 'code' => 'NORTH']);
     expect($r, 409, 'duplicate branch code is rejected');
@@ -1108,6 +1109,492 @@ try {
 
     $r = $staff->request('GET', '/api/audit');
     expect($r, 403, 'staff cannot read the audit trail');
+
+    /* --------------------------------------------------------------------- */
+    section('Structured names, addresses and service-area catalogue');
+    /* --------------------------------------------------------------------- */
+
+    $r = $anon->request('GET', '/api/addresses', null, [], false);
+    expect($r, 200, 'public service-area catalogue loads');
+    $cities = is_array($r['json']['cities'] ?? null) ? $r['json']['cities'] : [];
+    $cityNames = array_map(static fn($c) => (string) ($c['name'] ?? ''), $cities);
+    check(in_array('Jolo', $cityNames, true), 'catalogue includes Jolo');
+    check(in_array('Zamboanga City', $cityNames, true), 'catalogue includes Zamboanga City');
+    check(is_array($r['json']['regions'] ?? null) && count($r['json']['regions']) >= 2, 'catalogue includes regions');
+    check(is_array($r['json']['provinces'] ?? null) && count($r['json']['provinces']) >= 2, 'catalogue includes provinces');
+    $jolo = null;
+    foreach ($cities as $city) {
+        if (($city['name'] ?? '') === 'Jolo') {
+            $jolo = $city;
+        }
+    }
+    check($jolo !== null && in_array('Tulay', $jolo['barangays'] ?? [], true), 'Jolo lists its barangays');
+    check($jolo !== null && ($jolo['province'] ?? '') === 'Sulu' && ($jolo['postal_code'] ?? '') === '7400', 'Jolo carries province and postal code');
+
+    $r = $owner->request('POST', '/api/branches', [
+        'name' => 'South Branch',
+        'code' => 'south',
+        'street' => '17 Sunrise Road',
+        'barangay' => 'Tulay',
+        'city' => 'Jolo',
+        'contact_phone' => '09172222222',
+        'operating_hours' => '08:00-18:00',
+        'max_order_qty' => 10,
+        'rush_fee' => 25,
+        'outside_zone_fee' => 40,
+    ]);
+    expect($r, 201, 'owner creates a branch with a structured address and fees');
+    $southId = (int) ($r['json']['id'] ?? 0);
+    check($southId > 0, 'structured branch has an id');
+    check(($r['json']['address'] ?? '') === '17 Sunrise Road, Tulay, Jolo, Sulu 7400', 'structured branch address is composed');
+    check(($r['json']['province'] ?? '') === 'Sulu' && ($r['json']['region'] ?? '') === 'Bangsamoro Autonomous Region in Muslim Mindanao', 'branch province and region are derived');
+    check(($r['json']['postal_code'] ?? '') === '7400', 'branch postal code is derived');
+    check(abs((float) ($r['json']['rush_fee'] ?? -1) - 25.0) < 0.001, 'branch rush fee is saved');
+    check(abs((float) ($r['json']['outside_zone_fee'] ?? -1) - 40.0) < 0.001, 'branch outside-zone fee is saved');
+
+    $r = $anon->request('GET', '/api/branches/public', null, [], false);
+    expect($r, 200, 'public branch list loads after structured address');
+    $southPublic = null;
+    foreach (is_array($r['json']) ? $r['json'] : [] as $b) {
+        if ((int) ($b['id'] ?? 0) === $southId) {
+            $southPublic = $b;
+        }
+    }
+    check($southPublic !== null, 'public branch list includes the south branch');
+    check(abs((float) ($southPublic['rush_fee'] ?? -1) - 25.0) < 0.001, 'public branch exposes the rush fee');
+    check(abs((float) ($southPublic['outside_zone_fee'] ?? -1) - 40.0) < 0.001, 'public branch exposes the outside-zone fee');
+
+    $r = $owner->request('POST', '/api/branches', [
+        'name' => 'Bad Barangay Branch',
+        'code' => 'badloc',
+        'street' => '1 Wrong Road',
+        'barangay' => 'Tetuan',
+        'city' => 'Jolo',
+    ]);
+    expect($r, 422, 'barangay from another city is rejected for a branch');
+    check(($r['json']['code'] ?? '') === 'validation_error', 'bad barangay returns validation_error');
+
+    $r = $owner->request('POST', '/api/customers', [
+        'first_name' => 'Juan',
+        'middle_name' => 'Santos',
+        'last_name' => 'Dela Cruz',
+        'name_suffix' => 'Jr.',
+        'contact' => '09173333333',
+        'street' => '9 Peace Street',
+        'barangay' => 'Tulay',
+        'city' => 'Jolo',
+        'latitude' => 6.0541,
+        'longitude' => 121.0055,
+    ], ['X-Branch-Id: ' . $southId]);
+    expect($r, 201, 'owner creates a customer with structured name and address');
+    $structuredCustomerId = (int) ($r['json']['id'] ?? 0);
+    check($structuredCustomerId > 0, 'structured customer has an id');
+
+    $r = $owner->request('GET', '/api/customers?q=Dela%20Cruz', null, ['X-Branch-Id: ' . $southId]);
+    expect($r, 200, 'structured customer can be listed');
+    $structuredCustomer = null;
+    foreach (is_array($r['json']) ? $r['json'] : [] as $c) {
+        if ((int) ($c['id'] ?? 0) === $structuredCustomerId) {
+            $structuredCustomer = $c;
+        }
+    }
+    check($structuredCustomer !== null, 'structured customer is in the list');
+    check(($structuredCustomer['name'] ?? '') === 'Dela Cruz, Juan Santos Jr.', 'structured name uses last, first middle suffix');
+    check(($structuredCustomer['first_name'] ?? '') === 'Juan' && ($structuredCustomer['last_name'] ?? '') === 'Dela Cruz', 'structured name parts are exposed');
+    check(($structuredCustomer['barangay'] ?? '') === 'Tulay' && ($structuredCustomer['city'] ?? '') === 'Jolo', 'structured address parts are exposed');
+    check(abs((float) ($structuredCustomer['latitude'] ?? -1) - 6.0541) < 0.00001, 'structured customer keeps the map pin');
+
+    $r = $owner->request('POST', '/api/customers', [
+        'first_name' => 'Bad',
+        'last_name' => 'Address',
+        'street' => '1 Wrong Road',
+        'barangay' => 'Tetuan',
+        'city' => 'Jolo',
+    ], ['X-Branch-Id: ' . $southId]);
+    expect($r, 422, 'barangay from another city is rejected for a customer');
+
+    /* --------------------------------------------------------------------- */
+    section('Branch admins, delivery riders and branch team');
+    /* --------------------------------------------------------------------- */
+
+    $r = $owner->request('GET', '/api/me');
+    $ownerId = (int) ($r['json']['id'] ?? 0);
+
+    $r = $owner->request('POST', '/api/users', [
+        'first_name' => 'Anna',
+        'last_name' => 'Reyes',
+        'username' => 'southadmin',
+        'password' => 'AdminTemp123!',
+        'role' => 'branch_admin',
+        'branch_id' => $southId,
+        'contact' => '09174444444',
+    ]);
+    expect($r, 201, 'owner creates a branch admin account');
+    $southAdminId = (int) ($r['json']['id'] ?? 0);
+
+    $r = $owner->request('POST', '/api/users', [
+        'first_name' => 'Dan',
+        'last_name' => 'Rider',
+        'username' => 'southrider',
+        'password' => 'DeliverTemp123!',
+        'role' => 'delivery',
+        'branch_id' => $southId,
+        'contact' => '09175555555',
+    ]);
+    expect($r, 201, 'owner creates a delivery rider account');
+    $southDeliveryId = (int) ($r['json']['id'] ?? 0);
+
+    $r = $owner->request('POST', '/api/users', [
+        'first_name' => 'Mila',
+        'last_name' => 'Santos',
+        'username' => 'southstaff',
+        'password' => 'StaffTemp123!',
+        'role' => 'staff',
+        'branch_id' => $southId,
+    ]);
+    expect($r, 201, 'owner creates a south staff account');
+    $southStaffId = (int) ($r['json']['id'] ?? 0);
+
+    $branchAdmin = new ApiClient($base, 'branchadmin');
+    $r = $branchAdmin->login('southadmin', 'AdminTemp123!');
+    expect($r, 200, 'branch admin logs in with the temporary password');
+    check(($r['json']['role'] ?? '') === 'branch_admin', 'login returns the branch_admin role');
+    check((int) ($r['json']['branch_id'] ?? 0) === $southId, 'branch admin is bound to the south branch');
+    $r = $branchAdmin->request('POST', '/api/me/password', [
+        'current_password' => 'AdminTemp123!',
+        'new_password' => 'AdminFinal123!',
+    ]);
+    expect($r, 200, 'branch admin changes the temporary password');
+    $branchAdmin->absorb($r);
+    $r = $branchAdmin->request('GET', '/api/me');
+    check(($r['json']['role'] ?? '') === 'branch_admin' && ($r['json']['branch_name'] ?? '') === 'South Branch', 'branch admin is scoped to the south branch');
+    $r = $branchAdmin->request('GET', '/api/customers');
+    expect($r, 200, 'branch admin can list branch customers');
+    $r = $branchAdmin->request('GET', '/api/users?per_page=100');
+    expect($r, 200, 'branch admin can list their own branch team');
+    $teamUsers = is_array($r['json']) ? $r['json'] : [];
+    $teamIds = array_map(static fn($row) => (int) ($row['id'] ?? 0), $teamUsers);
+    check(in_array($southStaffId, $teamIds, true) && in_array($southDeliveryId, $teamIds, true), 'branch admin sees the staff and riders of their branch');
+    $outsideBranch = array_filter($teamUsers, static fn($row) => (int) ($row['branch_id'] ?? 0) !== $southId);
+    check(count($outsideBranch) === 0, 'branch admin user list contains only their branch');
+
+    $r = $branchAdmin->request('GET', '/api/users?role=owner');
+    expect($r, 403, 'branch admin cannot filter users by an owner role');
+
+    $r = $branchAdmin->request('POST', '/api/users', [
+        'first_name' => 'Nina',
+        'last_name' => 'Flores',
+        'username' => 'southstaff2',
+        'password' => 'TeamTemp123!',
+        'role' => 'staff',
+        'contact' => '09178888888',
+    ]);
+    expect($r, 201, 'branch admin adds a staff member without choosing a branch');
+    $southStaff2Id = (int) ($r['json']['id'] ?? 0);
+
+    $r = $owner->request('GET', '/api/users?q=southstaff2');
+    $createdByAdmin = is_array($r['json']) ? ($r['json'][0] ?? null) : null;
+    check($createdByAdmin !== null && (int) ($createdByAdmin['branch_id'] ?? 0) === $southId, 'branch admin-created staff is bound to the branch admin branch');
+
+    $r = $branchAdmin->request('POST', '/api/users', [
+        'first_name' => 'Nina',
+        'last_name' => 'Flores',
+        'username' => 'southstaff3',
+        'password' => 'TeamTemp123!',
+        'role' => 'staff',
+        'branch_id' => $mainId,
+    ]);
+    expect($r, 403, 'branch admin cannot add users to another branch');
+    check(($r['json']['code'] ?? '') === 'branch_forbidden', 'cross-branch user create returns branch_forbidden');
+
+    $r = $branchAdmin->request('POST', '/api/users', [
+        'first_name' => 'Nina',
+        'last_name' => 'Flores',
+        'username' => 'southowner',
+        'password' => 'TeamTemp123!',
+        'role' => 'owner',
+    ]);
+    expect($r, 403, 'branch admin cannot create an owner');
+
+    $r = $branchAdmin->request('POST', '/api/users', [
+        'first_name' => 'Nina',
+        'last_name' => 'Flores',
+        'username' => 'southadmin3',
+        'password' => 'TeamTemp123!',
+        'role' => 'branch_admin',
+    ]);
+    expect($r, 403, 'branch admin cannot create another branch admin directly');
+
+    $r = $branchAdmin->request('PUT', '/api/users/' . $southStaff2Id, [
+        'first_name' => 'Nina',
+        'last_name' => 'Flores',
+        'username' => 'southstaff2',
+        'role' => 'delivery',
+        'is_active' => true,
+    ]);
+    expect($r, 200, 'branch admin can change a team member role to delivery');
+
+    $r = $branchAdmin->request('PUT', '/api/users/' . $staffId, [
+        'name' => 'Main Staff',
+        'username' => 'staffmain',
+        'role' => 'staff',
+        'is_active' => true,
+        'branch_id' => $mainId,
+    ]);
+    expect($r, 403, 'branch admin cannot edit a user from another branch');
+
+    $r = $branchAdmin->request('PUT', '/api/users/' . $southAdminId, [
+        'first_name' => 'Anna',
+        'last_name' => 'Reyes',
+        'username' => 'southadmin',
+        'role' => 'staff',
+        'is_active' => true,
+    ]);
+    expect($r, 403, 'branch admin cannot edit a branch admin account through users');
+
+    $r = $branchAdmin->request('POST', '/api/branches/' . $mainId . '/admin', ['user_id' => $staffId]);
+    expect($r, 403, 'branch admin cannot assign an admin for another branch');
+
+    $r = $branchAdmin->request('POST', '/api/branches/' . $southId . '/admin', ['user_id' => $staffId]);
+    expect($r, 403, 'branch admin cannot promote someone from another branch');
+    check(($r['json']['code'] ?? '') === 'branch_forbidden', 'cross-branch admin assignment returns branch_forbidden');
+
+    $r = $branchAdmin->request('GET', '/api/branches');
+    expect($r, 403, 'branch admin cannot read the branch register');
+
+    $r = $branchAdmin->request('POST', '/api/branches/' . $southId . '/admin', ['user_id' => $southStaff2Id]);
+    expect($r, 200, 'branch admin assigns a teammate as the branch admin');
+    check((int) ($r['json']['branch_admin_id'] ?? 0) === $southStaff2Id, 'branch admin assignment updates the branch link');
+
+    $r = $branchAdmin->request('GET', '/api/me');
+    expect($r, 401, 'previous branch admin session is revoked after handover');
+
+    $r = $owner->request('GET', '/api/users?q=southadmin');
+    $handedOverAdmin = is_array($r['json']) ? ($r['json'][0] ?? null) : null;
+    check($handedOverAdmin !== null && ($handedOverAdmin['role'] ?? '') === 'staff', 'previous branch admin is demoted after self-service handover');
+
+    $delivery = new ApiClient($base, 'delivery');
+    $r = $delivery->login('southrider', 'DeliverTemp123!');
+    expect($r, 200, 'delivery rider logs in with the temporary password');
+    check(($r['json']['role'] ?? '') === 'delivery', 'login returns the delivery role');
+    check((int) ($r['json']['branch_id'] ?? 0) === $southId, 'delivery rider is bound to the south branch');
+    $r = $delivery->request('POST', '/api/me/password', [
+        'current_password' => 'DeliverTemp123!',
+        'new_password' => 'DeliverFinal123!',
+    ]);
+    expect($r, 200, 'delivery rider changes the temporary password');
+    $delivery->absorb($r);
+    $r = $delivery->request('GET', '/api/customers');
+    expect($r, 403, 'delivery rider cannot list customers');
+    $r = $delivery->request('GET', '/api/orders');
+    expect($r, 200, 'delivery rider can list orders');
+
+    $r = $owner->request('GET', '/api/branches/' . $southId . '/team');
+    expect($r, 200, 'owner reads the branch team');
+    $teamMembers = is_array($r['json']['members'] ?? null) ? $r['json']['members'] : [];
+    $teamRoles = array_map(static fn($m) => (string) ($m['role'] ?? ''), $teamMembers);
+    check(in_array('branch_admin', $teamRoles, true), 'branch team includes the branch admin');
+    check(in_array('delivery', $teamRoles, true), 'branch team includes delivery riders');
+    $riderMember = null;
+    foreach ($teamMembers as $m) {
+        if ((int) ($m['id'] ?? 0) === $southDeliveryId) {
+            $riderMember = $m;
+        }
+    }
+    check($riderMember !== null && ($riderMember['is_rider'] ?? false) === true, 'delivery team members are marked as riders');
+
+    $r = $owner->request('POST', '/api/branches/' . $southId . '/admin', ['user_id' => $southStaffId]);
+    expect($r, 200, 'owner assigns an existing user as branch admin');
+    check((int) ($r['json']['branch_admin_id'] ?? 0) === $southStaffId, 'branch admin link points at the assigned user');
+
+    $r = $owner->request('POST', '/api/branches/' . $southId . '/admin', [
+        'first_name' => 'Ben',
+        'last_name' => 'Cruz',
+        'username' => 'southadmin2',
+        'password' => 'AdminTemp123!',
+        'contact' => '09176666666',
+    ]);
+    expect($r, 200, 'owner creates a new branch admin');
+    $southAdmin2Id = (int) ($r['json']['branch_admin_id'] ?? 0);
+    check($southAdmin2Id > 0 && $southAdmin2Id !== $southStaffId, 'new branch admin replaces the previous one');
+    check(($r['json']['branch_admin']['name'] ?? '') === 'Cruz, Ben', 'new branch admin has a structured name');
+
+    $r = $owner->request('GET', '/api/users?q=southstaff');
+    expect($r, 200, 'owner can look up the previous admin');
+    $previousAdmin = is_array($r['json']) ? ($r['json'][0] ?? null) : null;
+    check($previousAdmin !== null && ($previousAdmin['role'] ?? '') === 'staff', 'previous branch admin is demoted to staff');
+
+    $r = $owner->request('POST', '/api/branches/' . $southId . '/admin', ['user_id' => $ownerId]);
+    expect($r, 409, 'owner cannot be made a branch admin');
+    check(($r['json']['code'] ?? '') === 'invalid_role_change', 'owner branch admin returns invalid_role_change');
+
+    $r = $delivery->request('POST', '/api/branches/' . $southId . '/admin', ['user_id' => $southAdmin2Id]);
+    expect($r, 403, 'delivery rider cannot assign a branch admin');
+
+    /* --------------------------------------------------------------------- */
+    section('Rush fees, outside-zone fees, delivery pins and rider assignment');
+    /* --------------------------------------------------------------------- */
+
+    $newCustomer = new ApiClient($base, 'structuredcust');
+    $r = $newCustomer->request('POST', '/api/register', [
+        'first_name' => 'Maria',
+        'middle_name' => 'Lopez',
+        'last_name' => 'Bautista',
+        'street' => '5 Market Lane',
+        'barangay' => 'Tulay',
+        'city' => 'Jolo',
+        'latitude' => 6.0525,
+        'longitude' => 121.0030,
+        'contact' => '09177777777',
+        'username' => 'mariab',
+        'password' => 'Customer123!',
+    ]);
+    expect($r, 201, 'customer signs up with a structured name and address');
+    $newCustomer->absorb($r);
+    check(($r['json']['name'] ?? '') === 'Bautista, Maria Lopez', 'signup composes the structured name');
+    check(($r['json']['first_name'] ?? '') === 'Maria' && ($r['json']['last_name'] ?? '') === 'Bautista', 'signup exposes structured name parts');
+
+    $r = $anon->request('GET', '/api/sizes?branch_id=' . $southId, null, [], false);
+    expect($r, 200, 'south branch prices load');
+    $southUnit = 0.0;
+    foreach (is_array($r['json']) ? $r['json'] : [] as $row) {
+        if ((int) ($row['id'] ?? 0) === $size1) {
+            $southUnit = (float) ($row['selling_price'] ?? 0);
+        }
+    }
+    check($southUnit > 0, 'south branch has a unit price');
+
+    // Rush is same-day and ignores the cut-off; regular same-day orders still close.
+    $r = $owner->request('PUT', '/api/branches/' . $southId, [
+        'name' => 'South Branch',
+        'code' => 'south',
+        'cutoff_time' => '00:00',
+        'max_order_qty' => 10,
+        'rush_fee' => 25,
+        'outside_zone_fee' => 40,
+    ]);
+    expect($r, 200, 'owner sets an already-passed cut-off on the south branch');
+
+    $r = $newCustomer->request('POST', '/api/my/orders', [
+        'branch_id' => $southId,
+        'pay' => 'cash',
+        'requested_date' => $today,
+        'is_rush' => false,
+        'items' => [['size_id' => $size1, 'qty' => 1, 'deposit_amount' => 0]],
+    ]);
+    expect($r, 409, 'same-day order after the cut-off is rejected');
+    check(($r['json']['code'] ?? '') === 'cutoff_passed', 'cut-off rejection returns cutoff_passed');
+
+    $r = $newCustomer->request('POST', '/api/my/orders', [
+        'branch_id' => $southId,
+        'pay' => 'cash',
+        'notes' => 'Rush delivery',
+        'requested_date' => date('Y-m-d', strtotime('+2 days')),
+        'time_slot' => 'Morning',
+        'is_rush' => true,
+        'is_outside_zone' => true,
+        'rush_fee' => 999,
+        'outside_zone_fee' => 999,
+        'delivery_street' => '5 Market Lane',
+        'delivery_barangay' => 'Tulay',
+        'delivery_city' => 'Jolo',
+        'delivery_latitude' => 6.0531,
+        'delivery_longitude' => 121.0044,
+        'items' => [['size_id' => $size1, 'qty' => 1, 'deposit_amount' => 0]],
+    ]);
+    expect($r, 201, 'customer places a rush outside-zone order');
+    $feeOrderId = (int) ($r['json']['id'] ?? 0);
+    check(($r['json']['requested_date'] ?? '') === $today, 'rush order is forced to the same day');
+    check(abs((float) ($r['json']['rush_fee'] ?? -1) - 25.0) < 0.001, 'order uses the branch rush fee');
+    check(abs((float) ($r['json']['outside_zone_fee'] ?? -1) - 40.0) < 0.001, 'order uses the branch outside-zone fee');
+    check(abs((float) ($r['json']['total_amount'] ?? -1) - ($southUnit + 65)) < 0.001, 'order total includes both fees');
+    check(($r['json']['delivery_address'] ?? '') === '5 Market Lane, Tulay, Jolo, Sulu 7400', 'order delivery address is composed');
+    check(abs((float) ($r['json']['delivery_latitude'] ?? -1) - 6.0531) < 0.00001, 'order keeps the delivery map latitude');
+    check(abs((float) ($r['json']['delivery_longitude'] ?? -1) - 121.0044) < 0.00001, 'order keeps the delivery map longitude');
+
+    $r = $newCustomer->request('PATCH', '/api/my/orders/' . $feeOrderId, [
+        'branch_id' => $southId,
+        'pay' => 'cash',
+        'notes' => 'Rush delivery',
+        'requested_date' => date('Y-m-d', strtotime('+2 days')),
+        'is_rush' => false,
+        'is_outside_zone' => true,
+        'items' => [['size_id' => $size1, 'qty' => 1, 'deposit_amount' => 0]],
+    ]);
+    expect($r, 200, 'customer edits the order fees');
+    check(abs((float) ($r['json']['rush_fee'] ?? -1)) < 0.001, 'removing rush clears the rush fee');
+    check(abs((float) ($r['json']['outside_zone_fee'] ?? -1) - 40.0) < 0.001, 'outside-zone fee remains when selected');
+    check(abs((float) ($r['json']['total_amount'] ?? -1) - ($southUnit + 40)) < 0.001, 'edited total includes only the outside-zone fee');
+    check(($r['json']['delivery_city'] ?? '') === 'Jolo', 'editing flags preserves the stored delivery city');
+    check(abs((float) ($r['json']['delivery_latitude'] ?? -1) - 6.0531) < 0.00001, 'editing flags preserves the stored map pin');
+
+    $r = $owner->request('POST', '/api/orders/' . $feeOrderId . '/assign', ['rider_id' => $southDeliveryId]);
+    expect($r, 200, 'owner assigns the delivery rider');
+    $r = $owner->request('GET', '/api/orders/' . $feeOrderId);
+    expect($r, 200, 'order loads after rider assignment');
+    check((int) ($r['json']['rider_id'] ?? 0) === $southDeliveryId, 'order stores the assigned rider');
+    check(($r['json']['rider_name'] ?? '') === 'Rider, Dan', 'order exposes the rider name');
+
+    $r = $delivery->request('POST', '/api/orders/' . $feeOrderId . '/assign', ['rider_id' => $southDeliveryId]);
+    expect($r, 200, 'delivery rider can assign themselves');
+    $r = $delivery->request('POST', '/api/orders/' . $feeOrderId . '/assign', ['rider_id' => $southAdmin2Id]);
+    expect($r, 403, 'delivery rider cannot assign someone else');
+    $r = $delivery->request('POST', '/api/orders/' . $feeOrderId . '/approve');
+    expect($r, 403, 'delivery rider cannot approve orders');
+
+    $r = $owner->request('POST', '/api/adjustments', [
+        'size_id' => $size1,
+        'reason' => 'Opening count',
+        'note' => 'South opening count',
+        'full' => 5,
+        'empty' => 1,
+    ], ['X-Branch-Id: ' . $southId]);
+    expect($r, 201, 'owner records south opening stock');
+
+    $r = $delivery->request('POST', '/api/orders/' . $feeOrderId . '/deliver', [
+        'proof_of_delivery' => 'Photo on file',
+        'rider_id' => $southDeliveryId,
+    ]);
+    expect($r, 200, 'delivery rider delivers the order');
+    check(abs((float) ($r['json']['total_amount'] ?? -1) - ($southUnit + 40)) < 0.001, 'delivered sale keeps the outside-zone fee');
+    $feeSaleId = (int) ($r['json']['sale_id'] ?? 0);
+    check($feeSaleId > 0, 'delivery creates a fee-aware sale');
+
+    $r = $owner->request('GET', '/api/sales/' . $feeSaleId, null, ['X-Branch-Id: ' . $southId]);
+    expect($r, 200, 'owner reads the delivered sale');
+    check(abs((float) ($r['json']['outside_zone_fee'] ?? -1) - 40.0) < 0.001, 'sale keeps the outside-zone fee');
+    check(abs((float) ($r['json']['rush_fee'] ?? -1)) < 0.001, 'sale records no rush fee after the edit');
+    check(abs((float) ($r['json']['total_amount'] ?? -1) - ($southUnit + 40)) < 0.001, 'sale total matches the fee-inclusive order');
+
+    $r = $delivery->request('GET', '/api/orders');
+    expect($r, 200, 'delivery rider reloads the order queue');
+    $deliveryOrder = null;
+    foreach (is_array($r['json']) ? $r['json'] : [] as $o) {
+        if ((int) ($o['id'] ?? 0) === $feeOrderId) {
+            $deliveryOrder = $o;
+        }
+    }
+    check($deliveryOrder !== null && ($deliveryOrder['status'] ?? '') === 'delivered', 'delivery rider sees the delivered order');
+    check(($deliveryOrder['rider_name'] ?? '') === 'Rider, Dan', 'delivery queue exposes the rider name');
+    check(abs((float) ($deliveryOrder['delivery_latitude'] ?? -1) - 6.0531) < 0.00001, 'delivery queue exposes the map pin');
+
+    $r = $newCustomer->request('POST', '/api/my/orders', [
+        'branch_id' => $southId,
+        'pay' => 'credit',
+        'requested_date' => date('Y-m-d', strtotime('+2 days')),
+        'is_outside_zone' => true,
+        'items' => [['size_id' => $size1, 'qty' => 1]],
+    ]);
+    expect($r, 201, 'customer places a credit order without a new delivery address');
+    $creditOrderId = (int) ($r['json']['id'] ?? 0);
+    check(($r['json']['delivery_address'] ?? '') === '5 Market Lane, Tulay, Jolo, Sulu 7400', 'order falls back to the saved customer address');
+    check(abs((float) ($r['json']['delivery_latitude'] ?? -1) - 6.0525) < 0.00001, 'order falls back to the saved map pin');
+
+    $r = $owner->request('POST', '/api/orders/' . $creditOrderId . '/deliver', [], ['X-Branch-Id: ' . $southId]);
+    expect($r, 200, 'owner delivers the credit order');
+    $r = $newCustomer->request('GET', '/api/my/account');
+    expect($r, 200, 'customer account loads after fee-aware credit delivery');
+    check(abs((float) ($r['json']['balance'] ?? -1) - ($southUnit + 40)) < 0.001, 'credit balance includes the outside-zone fee');
 
     /* --------------------------------------------------------------------- */
     section('Login rate limiting and session isolation');
