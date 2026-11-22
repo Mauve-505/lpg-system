@@ -55,7 +55,7 @@ Common codes: `validation_error`, `invalid_json`, `unsupported_media_type`,
 `branch_inactive`, `branch_forbidden`, `insufficient_stock`, `already_void`,
 `order_locked`, `order_limit`, `cutoff_passed`, `payment_not_verified`,
 `duplicate_reference`, `payment_not_required`, `payment_not_submitted`,
-`transfer_locked`, `server_error`.
+`transfer_locked`, `idempotency_conflict`, `duplicate_receipt`, `server_error`.
 
 ### Dates and money
 - Dates are `YYYY-MM-DD`; timestamps are `YYYY-MM-DD HH:MM:SS` in
@@ -103,6 +103,7 @@ Order create body:
   "branch_id": 1,
   "pay": "gcash",
   "reference_no": "GC-2026-000142",
+  "idempotency_key": "order-2026-000142",
   "requested_date": "2026-11-10",
   "time_slot": "09:00-12:00",
   "delivery_address": "123 Example Street",
@@ -125,6 +126,10 @@ Order create body:
 - Prices, deposits and any delivery fees are computed by the server from the
   branch catalogue; clients cannot set them. `deposit_amount` on a line item is
   informational — the server uses the configured cylinder deposit.
+- `idempotency_key` (optional, max 80 characters) makes create safe to retry:
+  the same key from the same customer/branch/payment returns the original order
+  with HTTP 200. Reusing the key with different details returns HTTP 409
+  `idempotency_conflict`.
 
 Pending-order editing accepts the same payment fields. Changing `pay` or
 `reference_no` releases the old reference so the customer can resubmit a
@@ -168,12 +173,12 @@ Only `pending` orders can be edited or cancelled.
 Sale create body:
 ```json
 {
-  "date": "2026-11-06",
   "pay": "maya",
   "reference_no": "MY-1042ABC",
   "customer_id": null,
+  "idempotency_key": "sale-2026-1042",
   "items": [
-    { "size_id": 1, "qty": 2, "back": 1, "price": null }
+    { "size_id": 1, "qty": 2, "back": 1 }
   ]
 }
 ```
@@ -185,8 +190,13 @@ Sale create body:
 - `customer_id` is optional for **all** payment methods; direct sales do not
   require a customer.
 - `back` is empties received; optional and defaults to 0.
-- `price` is optional; the branch price is used when omitted. Prices and
-  deposits are locked into `sale_items`, and the server computes totals.
+- Sale dates and unit prices are **always** set by the server: `date` and any
+  client `price`/`unit_price` are ignored. Prices and deposits are locked into
+  `sale_items`, and the server computes totals.
+- `idempotency_key` (optional, max 80 characters) makes create safe to retry:
+  the same key with the same branch/payment details returns the original sale
+  with HTTP 200. Reusing it with different details returns HTTP 409
+  `idempotency_conflict`.
 - Overselling returns `409 insufficient_stock`.
 
 ### Orders (staff/owner)
@@ -259,13 +269,16 @@ is not exposed through the API.
 
 ```json
 {
-  "date": "2026-11-06",
-  "receipt_no": "DR-1001",
+  "receipt": "DR-1001",
   "supplier": "Supplier name",
   "remarks": "",
   "items": [{ "size_id": 1, "full": 20, "empties": 10 }]
 }
 ```
+
+`receipt` is required (1–50 characters) and unique per branch; a duplicate
+returns HTTP 409 `duplicate_receipt`. The delivery date is always today; a
+client-supplied `date` is ignored.
 
 ### Adjustments / stock
 | Method | Path | Notes |
@@ -326,13 +339,13 @@ stock, active staff, or is the last active branch.
 ### Transfers
 | Method | Path | Notes |
 |--------|------|-------|
-| GET | `/api/transfers` | Owner all/source; staff source or destination. |
-| POST | `/api/transfers` | Create with optional `idempotency_key`. |
+| GET | `/api/transfers` | Owner: all/selected branch; branch_admin, staff and delivery: only transfers touching their own branch. |
+| POST | `/api/transfers` | Create with optional `idempotency_key`; branch-bound roles must use their own branch as source. |
 | GET | `/api/transfers/{id}` | Detail. |
 | POST | `/api/transfers/{id}/approve` | Requested → approved. |
 | POST | `/api/transfers/{id}/ship` | Approved → in_transit; deducts source stock. |
-| POST | `/api/transfers/{id}/receive` | In_transit → received; adds destination stock. |
-| POST | `/api/transfers/{id}/cancel` | Before shipping only. |
+| POST | `/api/transfers/{id}/receive` | In_transit → received; adds actual received quantities to destination stock and records shortages. |
+| POST | `/api/transfers/{id}/cancel` | Requested/approved, or in_transit by source-branch staff; in-transit cancellation restores source stock. |
 
 ```json
 {
@@ -343,6 +356,20 @@ stock, active staff, or is the last active branch.
   "items": [{ "size_id": 1, "qty_full": 2, "qty_empty": 1 }]
 }
 ```
+
+Receiving may omit `items` to accept all shipped quantities, or supply actual
+counts (with `full`/`empties` aliases accepted) and an optional note:
+
+```json
+{
+  "shortage_note": "2 cylinders damaged in transit",
+  "items": [{ "size_id": 1, "received_full": 3, "received_empty": 0 }]
+}
+```
+
+Received quantities cannot exceed shipped quantities (HTTP 422
+`validation_error`). The response exposes `shortage_full`, `shortage_empty`,
+`shortage_note` and per-item `received_full` / `received_empty`.
 
 ### Reports
 | Method | Path | Notes |

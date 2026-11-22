@@ -114,8 +114,9 @@ prepaid payment and verification fields. It has a preflight guard: if any
 non-void legacy credit sale still has an outstanding amount, the migration is
 refused with a clear message and no statements are applied. Settle those
 amounts first, then run `migrate.php` again. The legacy payments table is left
-intact as read-only history. Migrations 006 and 007 belong to later phases;
-their behaviour is out of scope for this release.
+intact as read-only history. Migration `006_operational_hardening` adds
+idempotency and receipt-uniqueness schema, and `008_transfer_receiving` adds
+shortage tracking. Migration `007_hygiene` belongs to the final cleanup phase.
 
 DDL auto-commits in MySQL. If a migration fails halfway, **restore the backup**
 rather than re-running the file.

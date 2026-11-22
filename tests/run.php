@@ -1090,9 +1090,32 @@ try {
     expect($r, 200, 'source-branch staff ships the transfer');
     check(($r['json']['status'] ?? '') === 'in_transit', 'transfer is in transit');
 
-    $r = $staff->request('POST', '/api/transfers/' . $transferId . '/cancel', ['reason' => 'Too late']);
-    expect($r, 409, 'shipped transfer cannot be cancelled');
-    check(($r['json']['code'] ?? '') === 'transfer_locked', 'shipped cancel returns transfer_locked');
+    $r = $owner->request('POST', '/api/transfers', [
+        'from_branch_id' => $mainId,
+        'to_branch_id' => $northId,
+        'notes' => 'Cancel after shipping',
+        'items' => [['size_id' => $size1, 'qty_full' => 3, 'qty_empty' => 0]],
+    ]);
+    expect($r, 201, 'owner creates a transfer to cancel after shipping');
+    $inTransitCancelId = (int) ($r['json']['id'] ?? 0);
+    $r = $owner->request('POST', '/api/transfers/' . $inTransitCancelId . '/approve');
+    expect($r, 200, 'owner approves the transfer to be cancelled');
+    $r = $staff->request('POST', '/api/transfers/' . $inTransitCancelId . '/ship');
+    expect($r, 200, 'source staff ships the transfer to be cancelled');
+
+    $stockBeforeCancel = (int) $pdo->query(
+        'SELECT COALESCE(SUM(full_change),0) FROM stock_movements WHERE branch_id=' . (int) $mainId . ' AND size_id=' . (int) $size1
+    )->fetchColumn();
+    $r = $staff->request('POST', '/api/transfers/' . $inTransitCancelId . '/cancel', ['reason' => 'Route closed']);
+    expect($r, 200, 'source staff cancels an in-transit transfer');
+    check(($r['json']['status'] ?? '') === 'cancelled', 'in-transit transfer is cancelled');
+    $stockAfterCancel = (int) $pdo->query(
+        'SELECT COALESCE(SUM(full_change),0) FROM stock_movements WHERE branch_id=' . (int) $mainId . ' AND size_id=' . (int) $size1
+    )->fetchColumn();
+    check($stockAfterCancel === $stockBeforeCancel + 3, 'cancelling an in-transit transfer restores source stock');
+    $r = $owner->request('POST', '/api/transfers/' . $inTransitCancelId . '/receive');
+    expect($r, 409, 'cancelled transfer cannot be received');
+    check(($r['json']['code'] ?? '') === 'transfer_locked', 'cancelled receive returns transfer_locked');
 
     $r = $staff->request('POST', '/api/transfers/' . $transferId . '/receive');
     expect($r, 403, 'source-branch staff cannot receive the transfer');
@@ -1981,6 +2004,164 @@ try {
     expect($r, 200, 'staff verifies the resubmitted reference');
     $r = $owner->request('POST', '/api/orders/' . $resubmitId . '/approve', null, $northHeader);
     expect($r, 200, 'resubmitted order can be approved after verification');
+
+    /* --------------------------------------------------------------------- */
+    section('Phase 2: pricing, idempotency and operational hardening');
+    /* --------------------------------------------------------------------- */
+
+    // (1) Client price override and backdating must be ignored.
+    $r = $owner->request('POST', '/api/sales', [
+        'date' => '2020-01-01',
+        'pay' => 'cash',
+        'items' => [['size_id' => $size1, 'qty' => 1, 'back' => 0, 'price' => 1, 'unit_price' => 1]],
+    ], ['X-Branch-Id: ' . $mainId]);
+    expect($r, 201, 'direct sale ignores client price and date');
+    $saleId = (int) ($r['json']['id'] ?? 0);
+    $r = $owner->request('GET', '/api/sales/' . $saleId, null, ['X-Branch-Id: ' . $mainId]);
+    expect($r, 200, 'direct sale reloads for assertions');
+    check(($r['json']['sale_date'] ?? '') === date('Y-m-d'), 'sale date is forced to today');
+    $saleItem = ($r['json']['items'][0] ?? []);
+    $expectedPrice = (float) $pdo->query(
+        'SELECT price FROM branch_prices WHERE branch_id=' . (int) $mainId . ' AND size_id=' . (int) $size1
+    )->fetchColumn();
+    check(abs((float) ($saleItem['unit_price'] ?? 0) - $expectedPrice) < 0.001, 'sale uses the branch price, not the client override');
+
+    // (2) Order idempotency replays without a second reservation.
+    $idemOrderBody = $prepaidOrder('cash', '');
+    $idemOrderBody['idempotency_key'] = 'phase2-order-idem-1';
+    $r = $customer->request('POST', '/api/my/orders', $idemOrderBody);
+    expect($r, 201, 'customer creates an idempotent order');
+    $idemOrderId = (int) ($r['json']['id'] ?? 0);
+    $r = $customer->request('POST', '/api/my/orders', $idemOrderBody);
+    expect($r, 200, 'reposting the same order idempotency key returns the existing order');
+    check((int) ($r['json']['id'] ?? 0) === $idemOrderId, 'order idempotency replay returns the same id');
+
+    // (3) Sale idempotency with conflicting details is refused.
+    $idemSaleBody = [
+        'idempotency_key' => 'phase2-sale-idem-1',
+        'pay' => 'cash',
+        'items' => [['size_id' => $size1, 'qty' => 1, 'back' => 0]],
+    ];
+    $r = $owner->request('POST', '/api/sales', $idemSaleBody, ['X-Branch-Id: ' . $mainId]);
+    expect($r, 201, 'owner creates an idempotent sale');
+    $idemSaleId = (int) ($r['json']['id'] ?? 0);
+    $r = $owner->request('POST', '/api/sales', $idemSaleBody, ['X-Branch-Id: ' . $mainId]);
+    expect($r, 200, 'reposting the same sale idempotency key returns the existing sale');
+    check((int) ($r['json']['id'] ?? 0) === $idemSaleId, 'sale idempotency replay returns the same id');
+    $conflictBody = $idemSaleBody;
+    $conflictBody['pay'] = 'maya';
+    $conflictBody['reference_no'] = 'MAYA-PHASE2-CONFLICT';
+    $r = $owner->request('POST', '/api/sales', $conflictBody, ['X-Branch-Id: ' . $mainId]);
+    expect($r, 409, 'reusing a sale key with different payment details is refused');
+    check(($r['json']['code'] ?? '') === 'idempotency_conflict', 'sale idempotency conflict returns idempotency_conflict');
+
+    // (4) Client deposit and fee fields are ignored; deposits come from cylinder_sizes.
+    $pdo->exec('UPDATE cylinder_sizes SET deposit_amount=250.00 WHERE id=' . (int) $size1);
+    $r = $customer->request('POST', '/api/my/orders', [
+        'branch_id' => $mainId,
+        'pay' => 'cash',
+        'deposit_amount' => 99999,
+        'deposit_total' => 99999,
+        'rush_fee' => 99999,
+        'outside_zone_fee' => 99999,
+        'subtotal' => 1,
+        'total_amount' => 1,
+        'items' => [['size_id' => $size1, 'qty' => 2, 'deposit_amount' => 99999]],
+    ]);
+    expect($r, 201, 'customer order ignores client deposit and fee fields');
+    $serverDepositOrder = (int) ($r['json']['id'] ?? 0);
+    check(abs((float) ($r['json']['deposit_total'] ?? 0) - 500.0) < 0.001, 'order deposit is computed server-side from cylinder_sizes');
+    $r = $customer->request('GET', '/api/my/orders/' . $serverDepositOrder);
+    expect($r, 200, 'server-computed deposit order reloads');
+    check(abs((float) ($r['json']['items'][0]['deposit_amount'] ?? 0) - 500.0) < 0.001, 'order item deposit is qty times per-cylinder deposit');
+    $pdo->exec('UPDATE cylinder_sizes SET deposit_amount=0 WHERE id=' . (int) $size1);
+
+    // (5) CSV exports escape formula-leading cells.
+    $pdo->exec("UPDATE customers SET first_name='=HYPERLINK(\"http://evil\")', name='=HYPERLINK(\"http://evil\")' WHERE id=" . (int) $customerId);
+    $csv = $owner->request('GET', '/api/reports/sales?from=' . $today . '&to=' . $today . '&format=csv');
+    check(strpos($csv['body'] ?? '', "'=HYPERLINK") !== false, 'CSV cells starting with = are prefixed with an apostrophe');
+
+    // (6) Branch-bound roles cannot see or create foreign transfers.
+    $r = $staff->request('GET', '/api/transfers');
+    expect($r, 200, 'source staff lists transfers');
+    $staffSeesMainTransfer = false;
+    foreach (is_array($r['json'] ?? null) ? $r['json'] : [] as $transferRow) {
+        $touchesMain = (int) ($transferRow['from_branch_id'] ?? 0) === $mainId
+            || (int) ($transferRow['to_branch_id'] ?? 0) === $mainId;
+        check($touchesMain, 'staff transfer list is branch-scoped');
+        if ((int) ($transferRow['id'] ?? 0) === $transferId) {
+            $staffSeesMainTransfer = true;
+        }
+    }
+    check($staffSeesMainTransfer, 'staff can see a transfer touching their own branch');
+
+    $activeBranchAdmin = new ApiClient($base, 'activebranchadmin');
+    $r = $activeBranchAdmin->login('southadmin2', 'AdminTemp123!');
+    expect($r, 200, 'active south branch admin logs in');
+
+    $r = $activeBranchAdmin->request('GET', '/api/transfers?branch_id=' . $mainId);
+    expect($r, 200, 'south branch admin lists transfers');
+    foreach (is_array($r['json'] ?? null) ? $r['json'] : [] as $transferRow) {
+        $touchesSouth = (int) ($transferRow['from_branch_id'] ?? 0) === $southId
+            || (int) ($transferRow['to_branch_id'] ?? 0) === $southId;
+        check($touchesSouth, 'branch admin cannot see transfers outside their branch even with a branch filter');
+    }
+
+    $r = $activeBranchAdmin->request('POST', '/api/transfers', [
+        'from_branch_id' => $mainId,
+        'to_branch_id' => $northId,
+        'items' => [['size_id' => $size1, 'qty_full' => 1]],
+    ]);
+    expect($r, 403, 'branch admin cannot create a transfer from a foreign branch');
+    check(($r['json']['code'] ?? '') === 'branch_forbidden', 'foreign transfer create returns branch_forbidden');
+
+    // (7) Duplicate plant delivery receipts are refused and dates cannot be backdated.
+    $receipt = 'PHASE2-RECEIPT-1';
+    $mainHeader = ['X-Branch-Id: ' . $mainId];
+    $r = $owner->request('POST', '/api/deliveries', [
+        'date' => '2020-01-01',
+        'receipt' => $receipt,
+        'items' => [['size_id' => $size1, 'full' => 1, 'empties' => 0]],
+    ], $mainHeader);
+    expect($r, 201, 'owner records a plant delivery');
+    $r = $owner->request('GET', '/api/deliveries', null, $mainHeader);
+    expect($r, 200, 'deliveries reload');
+    $phase2Delivery = null;
+    foreach (is_array($r['json'] ?? null) ? $r['json'] : [] as $deliveryRow) {
+        if (($deliveryRow['receipt_no'] ?? '') === $receipt) {
+            $phase2Delivery = $deliveryRow;
+        }
+    }
+    check(($phase2Delivery['delivery_date'] ?? '') === date('Y-m-d'), 'delivery date is forced to today');
+    $r = $owner->request('POST', '/api/deliveries', [
+        'receipt' => $receipt,
+        'items' => [['size_id' => $size1, 'full' => 1, 'empties' => 0]],
+    ], $mainHeader);
+    expect($r, 409, 'duplicate plant delivery receipt is refused');
+    check(($r['json']['code'] ?? '') === 'duplicate_receipt', 'duplicate receipt returns duplicate_receipt');
+
+    // (8) Receiving with shortages records actual quantities and a note.
+    $r = $owner->request('POST', '/api/transfers', [
+        'from_branch_id' => $mainId,
+        'to_branch_id' => $northId,
+        'items' => [['size_id' => $size1, 'qty_full' => 5, 'qty_empty' => 0]],
+    ]);
+    expect($r, 201, 'owner creates a short-shipment transfer');
+    $shortTransferId = (int) ($r['json']['id'] ?? 0);
+    $r = $owner->request('POST', '/api/transfers/' . $shortTransferId . '/approve');
+    expect($r, 200, 'owner approves the short-shipment transfer');
+    $r = $staff->request('POST', '/api/transfers/' . $shortTransferId . '/ship');
+    expect($r, 200, 'source staff ships the short-shipment transfer');
+    $r = $owner->request('POST', '/api/transfers/' . $shortTransferId . '/receive', [
+        'shortage_note' => '2 cylinders damaged in transit',
+        'items' => [['size_id' => $size1, 'received_full' => 3, 'received_empty' => 0]],
+    ]);
+    expect($r, 200, 'owner receives the transfer with a shortage');
+    check((int) ($r['json']['shortage_full'] ?? 0) === 2, 'transfer records a 2-full-cylinder shortage');
+    check(($r['json']['shortage_note'] ?? '') === '2 cylinders damaged in transit', 'transfer stores the shortage note');
+    $r = $owner->request('GET', '/api/transfers/' . $shortTransferId);
+    expect($r, 200, 'short-shipment transfer reloads');
+    check((int) ($r['json']['items'][0]['received_full'] ?? 0) === 3, 'transfer item stores the actual received quantity');
 
     /* --------------------------------------------------------------------- */
     section('Login rate limiting and session isolation');

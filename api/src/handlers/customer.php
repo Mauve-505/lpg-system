@@ -10,7 +10,6 @@ function parse_order_items(): array
         $items = [[
             'size_id' => body_value('size_id'),
             'qty' => body_value('qty'),
-            'deposit_amount' => body_value('deposit_amount', 0),
         ]];
     }
     if (!is_array($items) || count($items) === 0) {
@@ -38,11 +37,8 @@ function parse_order_items(): array
             fail('Each cylinder size may only appear once per order.', 422, 'validation_error', ['field' => 'items']);
         }
         $seen[$sizeId] = true;
-        $deposit = isset($it['deposit_amount']) && is_numeric($it['deposit_amount']) ? (float) $it['deposit_amount'] : 0;
-        if ($deposit < 0 || $deposit > 100000) {
-            fail('Invalid deposit amount.', 422, 'validation_error', ['field' => 'items']);
-        }
-        $size = row('SELECT id, label, selling_price, valve_type FROM cylinder_sizes WHERE id=? AND is_active=1', [$sizeId]);
+        // Deposits are server-authoritative: any client-supplied deposit_amount is ignored.
+        $size = row('SELECT id, label, selling_price, valve_type, deposit_amount FROM cylinder_sizes WHERE id=? AND is_active=1', [$sizeId]);
         if (!$size) {
             fail('One of the selected cylinder sizes is not available.', 422, 'validation_error', ['field' => 'items']);
         }
@@ -50,7 +46,7 @@ function parse_order_items(): array
             'size_id' => $sizeId,
             'label' => $size['label'],
             'qty' => (int) $qty,
-            'deposit_amount' => round($deposit, 2),
+            'deposit_each' => money($size['deposit_amount']),
             'valve_type' => $size['valve_type'],
         ];
     }
@@ -64,9 +60,11 @@ function price_order_items(int $branchId, array $items, array $feeValues = []): 
     $deposits = 0.0;
     foreach ($items as &$it) {
         $it['unit_price'] = resolve_price($branchId, (int) $it['size_id']);
-        $it['line_total'] = round($it['qty'] * $it['unit_price'] + $it['deposit_amount'], 2);
+        $lineDeposit = round($it['qty'] * $it['deposit_each'], 2);
+        $it['deposit_amount'] = $lineDeposit; // Kept as the LINE deposit for existing insert/delivery callers.
+        $it['line_total'] = round($it['qty'] * $it['unit_price'] + $lineDeposit, 2);
         $subtotal += $it['qty'] * $it['unit_price'];
-        $deposits += $it['deposit_amount'];
+        $deposits += $lineDeposit;
     }
     unset($it);
 
@@ -151,6 +149,22 @@ function api_my_orders_create(): void
     }
 
     [$payment, $paymentReference] = payment_input();
+    $idempotency = input_str('idempotency_key', 'Idempotency key', 0, 80, false);
+
+    if ($idempotency !== '') {
+        $existing = row('SELECT * FROM orders WHERE idempotency_key=?', [$idempotency]);
+        if ($existing) {
+            if ((int) $existing['customer_id'] !== (int) $u['customer_id']
+                || (int) $existing['branch_id'] !== $branchId
+                || $existing['payment_method'] !== $payment
+                || ($existing['payment_reference'] ?? null) !== $paymentReference) {
+                fail('That idempotency key was already used for a different order.', 409, 'idempotency_conflict');
+            }
+            $o = row('SELECT o.*, b.name branch_name, r.name rider_name FROM orders o JOIN branches b ON b.id=o.branch_id LEFT JOIN users r ON r.id=o.rider_id WHERE o.id=?', [(int) $existing['id']]);
+            json_response(order_payload($o), 200);
+        }
+    }
+
     $paymentStatus = $payment === 'cash' ? 'unpaid' : 'pending_verification';
     $notes = input_str('notes', 'Notes', 0, 200, false);
     $requested = input_date('requested_date', 'Requested delivery date', false) ?: today();
@@ -194,37 +208,49 @@ function api_my_orders_create(): void
         }
     }
 
-    $orderId = tx(function () use ($u, $branchId, $items, $payment, $paymentReference, $paymentStatus, $notes, $requested, $timeSlot, $delivery, $valve, $fees) {
-        $priced = price_order_items((int) $branchId, $items, $fees);
-        q(
-            'INSERT INTO orders (branch_id, customer_id, payment_method, payment_reference, payment_status, notes, status, order_date, requested_date,
-                time_slot, delivery_address, delivery_street, delivery_barangay, delivery_city, delivery_province,
-                delivery_region, delivery_postal_code, delivery_latitude, delivery_longitude, valve_type,
-                is_rush, rush_fee, is_outside_zone, outside_zone_fee,
-                subtotal, deposit_total, total_amount, created_by, size_id, qty)
-             VALUES (?,?,?,?,?,?,"pending",?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
-            [
-                (int) $branchId, (int) $u['customer_id'], $payment, $paymentReference, $paymentStatus,
-                $notes === '' ? null : $notes, today(),
-                $requested, $timeSlot === '' ? null : $timeSlot, $delivery['address'], $delivery['street'],
-                $delivery['barangay'], $delivery['city'], $delivery['province'], $delivery['region'],
-                $delivery['postal_code'], $delivery['latitude'], $delivery['longitude'], $valve,
-                $priced['is_rush'], $priced['rush_fee'], $priced['is_outside_zone'], $priced['outside_zone_fee'],
-                $priced['subtotal'], $priced['deposit_total'], $priced['total_amount'], (int) $u['id'],
-                $priced['items'][0]['size_id'], array_sum(array_column($priced['items'], 'qty')),
-            ]
-        );
-        $id = (int) db()->lastInsertId();
-        reserve_payment_reference((string) $payment, $paymentReference, $id, null);
-        foreach ($priced['items'] as $it) {
+    try {
+        $orderId = tx(function () use ($u, $branchId, $items, $payment, $paymentReference, $idempotency, $paymentStatus, $notes, $requested, $timeSlot, $delivery, $valve, $fees) {
+            $priced = price_order_items((int) $branchId, $items, $fees);
             q(
-                'INSERT INTO order_items (order_id, size_id, qty, unit_price, deposit_amount, line_total) VALUES (?,?,?,?,?,?)',
-                [$id, $it['size_id'], $it['qty'], $it['unit_price'], $it['deposit_amount'], $it['line_total']]
+                'INSERT INTO orders (branch_id, customer_id, payment_method, payment_reference, idempotency_key, payment_status, notes, status, order_date, requested_date,
+                    time_slot, delivery_address, delivery_street, delivery_barangay, delivery_city, delivery_province,
+                    delivery_region, delivery_postal_code, delivery_latitude, delivery_longitude, valve_type,
+                    is_rush, rush_fee, is_outside_zone, outside_zone_fee,
+                    subtotal, deposit_total, total_amount, created_by, size_id, qty)
+                 VALUES (?,?,?,?,?,?,?,"pending",?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                [
+                    (int) $branchId, (int) $u['customer_id'], $payment, $paymentReference,
+                    $idempotency === '' ? null : $idempotency, $paymentStatus,
+                    $notes === '' ? null : $notes, today(),
+                    $requested, $timeSlot === '' ? null : $timeSlot, $delivery['address'], $delivery['street'],
+                    $delivery['barangay'], $delivery['city'], $delivery['province'], $delivery['region'],
+                    $delivery['postal_code'], $delivery['latitude'], $delivery['longitude'], $valve,
+                    $priced['is_rush'], $priced['rush_fee'], $priced['is_outside_zone'], $priced['outside_zone_fee'],
+                    $priced['subtotal'], $priced['deposit_total'], $priced['total_amount'], (int) $u['id'],
+                    $priced['items'][0]['size_id'], array_sum(array_column($priced['items'], 'qty')),
+                ]
             );
+            $id = (int) db()->lastInsertId();
+            reserve_payment_reference((string) $payment, $paymentReference, $id, null);
+            foreach ($priced['items'] as $it) {
+                q(
+                    'INSERT INTO order_items (order_id, size_id, qty, unit_price, deposit_amount, line_total) VALUES (?,?,?,?,?,?)',
+                    [$id, $it['size_id'], $it['qty'], $it['unit_price'], $it['deposit_amount'], $it['line_total']]
+                );
+            }
+            q('UPDATE orders SET order_no=? WHERE id=?', [doc_no('ORD', today(), $id), $id]);
+            return $id;
+        });
+    } catch (PDOException $e) {
+        if ($e->getCode() === '23000' && $idempotency !== '') {
+            $existing = row('SELECT * FROM orders WHERE idempotency_key=?', [$idempotency]);
+            if ($existing) {
+                $o = row('SELECT o.*, b.name branch_name, r.name rider_name FROM orders o JOIN branches b ON b.id=o.branch_id LEFT JOIN users r ON r.id=o.rider_id WHERE o.id=?', [(int) $existing['id']]);
+                json_response(order_payload($o), 200);
+            }
         }
-        q('UPDATE orders SET order_no=? WHERE id=?', [doc_no('ORD', today(), $id), $id]);
-        return $id;
-    });
+        throw $e;
+    }
 
     $o = row('SELECT o.*, b.name branch_name, r.name rider_name FROM orders o JOIN branches b ON b.id=o.branch_id LEFT JOIN users r ON r.id=o.rider_id WHERE o.id=?', [$orderId]);
     audit($u, 'create', 'order', $orderId, null, ['status' => 'pending', 'total_amount' => $o['total_amount'], 'branch_id' => (int) $branchId], (int) $branchId);

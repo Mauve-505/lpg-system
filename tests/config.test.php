@@ -29,6 +29,9 @@ return [
         'lockout_minutes' => 15,
         'signup_max_attempts' => 5,
         'max_body_bytes' => 1048576,
+        'trusted_proxies' => [],
+        'progressive_delay_ms' => 0,
+        'progressive_delay_max_ms' => 0,
     ],
     'bootstrap' => [
         'admin_username' => 'admin',

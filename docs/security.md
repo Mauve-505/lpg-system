@@ -58,10 +58,13 @@ patched.
 - Per username across all IPs: `security.login_max_user_attempts` (default 10).
   This prevents IP rotation from brute-forcing one account.
 - Per IP: `security.ip_max_attempts` (default 30).
-- Signup: `security.signup_max_attempts` (default 5) per IP; **successful
-  signups count too**, so an attacker cannot create unlimited accounts.
+- Signup: `security.signup_max_attempts` (default 5) per IP and per
+  username+IP; **successful signups count too**, so an attacker cannot create
+  unlimited accounts.
 - OTP request endpoint has its own per-IP cap.
-- Exceeding a limit returns HTTP `429` with `Retry-After`.
+- Exceeding a limit returns HTTP `429` with `Retry-After`. Production can add
+  exponential backoff with `security.progressive_delay_ms` /
+  `security.progressive_delay_max_ms`; it is disabled in tests.
 - Old `login_attempts` rows are deleted opportunistically after 7 days.
 
 ### Not implemented
@@ -142,7 +145,10 @@ those dependencies or self-host fonts.
 Roles:
 
 - `owner` — all branches, all administrative functions.
+- `branch_admin` — exactly one branch; may manage that branch's team, customers
+  and stock operations.
 - `staff` — exactly one branch, operational functions for that branch.
+- `delivery` — exactly one branch; may view and work the assigned order queue.
 - `customer` — own account and own orders only.
 
 Enforcement:
@@ -157,7 +163,9 @@ Enforcement:
 - Owner writes require one concrete **active** branch. Missing branch returns
   `400 branch_required`; inactive returns `409 branch_inactive`.
 - Cross-branch order/transfer actions use `require_branch_access()` and return
-  `403 branch_forbidden`.
+  `403 branch_forbidden`. `branch_admin`, `staff` and `delivery` are all
+  branch-bound: transfer lists ignore client `branch_id` filters for them, and
+  creating a transfer requires their own branch as the source.
 - Customer order queries filter by the customer's own ID.
 - Staff cannot list users, create branches, or read the audit trail.
 - Customers cannot read the sales register, users, reports or audit trail.
@@ -187,9 +195,13 @@ data isolation.
 - Sales, deliveries and adjustments are **voided/reversed**, not hard-deleted.
   Voids require a reason and write a reversal ledger row.
 - Order prices are locked at order creation. Changing branch prices later does
-  not rewrite pending or delivered order totals. Prices, cylinder deposits and
-  delivery fees are computed server-only; client-supplied amounts are not
-  trusted.
+  not rewrite pending or delivered order totals. Sale/delivery dates are forced
+  to today, and prices, cylinder deposits and delivery fees are computed
+  server-only; client-supplied `date`, `price`, `unit_price`, `deposit_amount`,
+  `rush_fee` and `outside_zone_fee` are ignored.
+- Orders, sales and transfers accept an optional `idempotency_key`. Reposting
+  the same key with the same details returns the original resource (HTTP 200);
+  a conflicting re-use returns HTTP 409 `idempotency_conflict`.
 - Prepaid payment methods only: `cash` (cash on delivery), `gcash`, `maya`.
   Cash needs no verification. A GCash/Maya order starts at
   `payment_status: pending_verification` when the customer supplies a 4–80
@@ -209,8 +221,11 @@ data isolation.
   The write/list endpoints were removed; there is no balance ledger or
   record-payment flow to manipulate.
 - Transfers use a state machine: `requested → approved → in_transit → received`
-  or `cancelled` before shipping. Reposting a create with the same
-  `idempotency_key` returns the existing transfer instead of duplicating stock.
+  or `cancelled`. Shipping deducts source stock; receiving credits only the
+  **actual** quantities recorded, and shortages are stored with a note. Source
+  staff may cancel an `in_transit` transfer, which reverses the ship movement in
+  the same transaction. Duplicate plant delivery receipts are rejected with
+  HTTP 409 `duplicate_receipt`.
 - Branch deactivation is blocked when the branch has open orders/transfers,
   nonzero stock, active staff, or is the last active branch.
 - Audit entries are written for privileged and financial actions: logins,
@@ -227,6 +242,12 @@ data isolation.
   this in production.**
 - Database errors are logged with file/line, but the client sees only
   “A database error occurred.”
+- The client IP used for rate limiting and audit comes from `REMOTE_ADDR`.
+  `X-Forwarded-For` is ignored unless the direct peer matches
+  `security.trusted_proxies` (exact IPs or CIDRs), so an attacker cannot spoof
+  rate-limit identity by adding a header.
+- CSV exports prefix spreadsheet-formula-leading cells (`=`, `+`, `-`, `@`,
+  tab, carriage return) with an apostrophe.
 - Audit writes are best-effort **after** the business transaction commits. If
   the audit insert fails, the error is logged but the successful transaction is
   not turned into an HTTP 500. This avoids losing a completed sale because of a

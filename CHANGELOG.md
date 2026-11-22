@@ -2,7 +2,49 @@
 
 All notable changes to this project are recorded here.
 
-## Unreleased / Phase 1 — Prepaid payments
+## Unreleased / Phase 2 — Operational hardening
+
+### Added
+
+- Idempotency for order, sale and transfer creates. Reposting the same
+  `idempotency_key` with matching details returns the existing resource with
+  HTTP 200; conflicting details return HTTP 409 `idempotency_conflict`.
+- Transfer receiving records actual `received_full` / `received_empty`
+  quantities, shortage totals and an optional `shortage_note`. Destination stock
+  and movement notes use the actual received counts.
+- In-transit transfers can be cancelled by the source branch; the ship movement
+  is reversed atomically. Duplicate plant delivery receipts for a branch return
+  HTTP 409 `duplicate_receipt`.
+- Config-driven trusted proxies (`security.trusted_proxies`) and optional
+  exponential backoff (`security.progressive_delay_ms` /
+  `security.progressive_delay_max_ms`) for rate-limit responses. CSV cells that
+  begin with a spreadsheet formula character are escaped.
+
+### Changed
+
+- `branch_admin`, `staff` and `delivery` are all branch-bound for transfer
+  reads and creates; client-supplied `branch_id` can no longer expose or create
+  a foreign transfer.
+- Sale/delivery dates are forced to today. Client-supplied prices, unit prices,
+  deposits and delivery fees are ignored; all amounts are computed from the
+  branch catalogue and cylinder-size deposits. Same-day cutoffs on order
+  create/edit remain enforced.
+- Signup rate limiting now applies per username+IP as well as per IP.
+
+### Migration
+
+- `006_operational_hardening` adds idempotency keys, structured service areas
+  and per-branch delivery receipt uniqueness. `008_transfer_receiving` adds
+  received quantities and shortage notes. Both have rollback files and are
+  included in the fresh schema. `007_hygiene` remains for the cleanup phase.
+
+### Tests
+
+- The end-to-end suite now has 555 passing assertions covering idempotency,
+  price/deposit server authority, no backdating, CSV escaping, branch-scoped
+  transfers, duplicate receipts, transfer shortages and in-transit cancellation.
+
+## Phase 1 — Prepaid payments
 
 > **Historical note:** the `[2.0.0]` and `[1.0.0]` entries below describe the
 > original credit-enabled system. Credit/utang, customer balances, unpaid

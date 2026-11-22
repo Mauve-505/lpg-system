@@ -54,9 +54,67 @@ function today(): string
 
 function client_ip(): string
 {
-    // Never trust X-Forwarded-For unless a trusted proxy is configured.
-    $ip = $_SERVER['REMOTE_ADDR'] ?? '0.0.0.0';
-    return substr((string) $ip, 0, 45);
+    $remote = (string) ($_SERVER['REMOTE_ADDR'] ?? '0.0.0.0');
+    $trusted = config('security.trusted_proxies', []);
+    // Never trust X-Forwarded-For unless the direct peer is a trusted proxy.
+    if (is_array($trusted) && $trusted !== [] && ip_matches_list($remote, $trusted)) {
+        $xff = (string) ($_SERVER['HTTP_X_FORWARDED_FOR'] ?? '');
+        // Walk right-to-left: the rightmost hop is the one closest to us.
+        foreach (array_reverse(array_map('trim', explode(',', $xff))) as $candidate) {
+            if ($candidate === '' || !filter_var($candidate, FILTER_VALIDATE_IP)) {
+                continue;
+            }
+            if (ip_matches_list($candidate, $trusted)) {
+                continue;
+            }
+            return substr($candidate, 0, 45);
+        }
+    }
+    return substr($remote, 0, 45);
+}
+
+/** Internal helper: exact IP or IPv4/IPv6 CIDR membership (inet_pton bits). */
+function ip_matches_list(string $ip, array $entries): bool
+{
+    $packed = @inet_pton($ip);
+    if ($packed === false) {
+        return false;
+    }
+    $bits = strlen($packed) * 8;
+    foreach ($entries as $entry) {
+        if (!is_string($entry)) {
+            continue;
+        }
+        $entry = trim($entry);
+        if ($entry === '') {
+            continue;
+        }
+        $prefix = $bits;
+        if (strpos($entry, '/') !== false) {
+            [$entry, $prefixRaw] = explode('/', $entry, 2);
+            if (!ctype_digit($prefixRaw)) {
+                continue;
+            }
+            $prefix = (int) $prefixRaw;
+        }
+        $network = @inet_pton($entry);
+        if ($network === false || strlen($network) !== strlen($packed) || $prefix < 0 || $prefix > $bits) {
+            continue;
+        }
+        $fullBytes = intdiv($prefix, 8);
+        if ($fullBytes > 0 && strcmp(substr($packed, 0, $fullBytes), substr($network, 0, $fullBytes)) !== 0) {
+            continue;
+        }
+        $remainder = $prefix % 8;
+        if ($remainder > 0) {
+            $mask = (0xFF00 >> $remainder) & 0xFF;
+            if ((ord($packed[$fullBytes]) & $mask) !== (ord($network[$fullBytes]) & $mask)) {
+                continue;
+            }
+        }
+        return true;
+    }
+    return false;
 }
 
 function read_json_body(): array
@@ -264,6 +322,16 @@ function bind_page(PDOStatement $st, array $params, int $limit, int $offset): vo
     $st->bindValue($i, $offset, PDO::PARAM_INT);
 }
 
+/** Neutralise spreadsheet formula injection in exported cells. */
+function csv_safe_cell($value): string
+{
+    $s = $value === null ? '' : (string) $value;
+    if ($s !== '' && strpos("=+-@\t\r", $s[0]) !== false) {
+        return "'" . $s;
+    }
+    return $s;
+}
+
 function csv_download(string $filename, array $headers, array $rows): void
 {
     if (!headers_sent()) {
@@ -274,9 +342,9 @@ function csv_download(string $filename, array $headers, array $rows): void
     $out = fopen('php://output', 'w');
     // Excel BOM so UTF-8 names render correctly.
     fwrite($out, "\xEF\xBB\xBF");
-    fputcsv($out, $headers);
+    fputcsv($out, array_map('csv_safe_cell', $headers));
     foreach ($rows as $r) {
-        fputcsv($out, $r);
+        fputcsv($out, array_map('csv_safe_cell', $r));
     }
     fclose($out);
     exit;

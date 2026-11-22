@@ -47,7 +47,10 @@ variable the API looks for `api/config.php`.
 | `security.ip_max_attempts` | — | `30` | Failed logins per IP inside the window. |
 | `security.login_window_minutes` | — | `15` | Rate-limit window. |
 | `security.lockout_minutes` | — | `15` | Informational lockout duration shown in retry messages. |
-| `security.signup_max_attempts` | — | `5` | Signups per IP inside the window. |
+| `security.signup_max_attempts` | — | `5` | Signups per IP and per username+IP inside the window. |
+| `security.trusted_proxies` | `LPG_TRUSTED_PROXIES` | empty | Comma-separated IPs/CIDRs allowed to supply `X-Forwarded-For`. Empty ignores the header. |
+| `security.progressive_delay_ms` | `LPG_PROGRESSIVE_DELAY_MS` | `200` | Base backoff before a 429; `0` disables the delay. |
+| `security.progressive_delay_max_ms` | `LPG_PROGRESSIVE_DELAY_MAX_MS` | `5000` | Cap for exponential backoff. |
 | `security.max_body_bytes` | — | `1048576` | Maximum JSON body size (1 MiB). |
 | `bootstrap.admin_username` | `LPG_ADMIN_USERNAME` | `admin` | Owner created by `database/seed.php` when no owner exists. |
 | `bootstrap.admin_password` | `LPG_ADMIN_PASSWORD` | `admin123` | Temporary bootstrap password; forced to change at first login. Change before real seeding. |

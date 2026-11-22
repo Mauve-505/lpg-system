@@ -134,7 +134,6 @@ function parse_sale_items(): array
         $items = [[
             'size_id' => body_value('size_id'),
             'qty' => body_value('qty'),
-            'price' => body_value('price'),
             'back' => body_value('back', 0),
         ]];
     }
@@ -166,11 +165,8 @@ function parse_sale_items(): array
             fail('Each cylinder size may only appear once per sale.', 422, 'validation_error', ['field' => 'items']);
         }
         $seen[$sid] = true;
-        $price = isset($it['price']) && $it['price'] !== '' && is_numeric($it['price']) ? (float) $it['price'] : null;
-        if ($price !== null && ($price < 0 || $price > 1000000)) {
-            fail('Invalid unit price.', 422, 'validation_error', ['field' => 'items']);
-        }
-        $clean[] = ['size_id' => $sid, 'qty' => (int) $qty, 'back' => (int) $back, 'price' => $price];
+        // Unit prices are always resolved server-side inside the create transaction.
+        $clean[] = ['size_id' => $sid, 'qty' => (int) $qty, 'back' => (int) $back];
     }
     return $clean;
 }
@@ -182,8 +178,24 @@ function api_sales_create(): void
     $branchId = (int) $scope['id'];
     $branch = require_active_branch($branchId);
 
-    $date = input_date('date', 'Sale date', false) ?: today();
+    $date = today();
     [$pay, $payReference] = payment_input();
+    $idempotency = input_str('idempotency_key', 'Idempotency key', 0, 80, false);
+
+    if ($idempotency !== '') {
+        $existing = row('SELECT * FROM sales WHERE idempotency_key=?', [$idempotency]);
+        if ($existing) {
+            if ((int) $existing['branch_id'] !== $branchId
+                || $existing['payment_method'] !== $pay
+                || ($existing['payment_reference'] ?? null) !== $payReference) {
+                fail('That idempotency key was already used for a different sale.', 409, 'idempotency_conflict');
+            }
+            $s = load_sale_for_user($u, (int) $existing['id']);
+            $items = sales_items_batch([(int) $existing['id']]);
+            json_response(sale_payload($s, $items[(int) $existing['id']] ?? []), 200);
+        }
+    }
+
     $customerId = input_int('customer_id', 'Customer', 1, null, false);
     if ($customerId !== null) {
         $c = row('SELECT id, is_active FROM customers WHERE id=?', [$customerId]);
@@ -197,52 +209,65 @@ function api_sales_create(): void
     $feeTotal = round($fees['rush_fee'] + $fees['outside_zone_fee'], 2);
 
     $items = parse_sale_items();
-    $result = tx(function () use ($u, $branchId, $date, $pay, $payReference, $customerId, $items, $fees, $feeTotal) {
-        $sizeIds = array_map(static fn($x) => (int) $x['size_id'], $items);
-        lock_stock($branchId, $sizeIds);
-        $stock = stock_balances($branchId, $sizeIds);
-        foreach ($items as &$it) {
-            $sid = (int) $it['size_id'];
-            if ($stock[$sid]['full_qty'] < $it['qty']) {
-                fail('Only ' . $stock[$sid]['full_qty'] . ' full ' . size_label($sid) . ' cylinder(s) in stock at this branch.', 409, 'insufficient_stock');
+    try {
+        $result = tx(function () use ($u, $branchId, $date, $pay, $payReference, $idempotency, $customerId, $items, $fees, $feeTotal) {
+            $sizeIds = array_map(static fn($x) => (int) $x['size_id'], $items);
+            lock_stock($branchId, $sizeIds);
+            $stock = stock_balances($branchId, $sizeIds);
+            foreach ($items as &$it) {
+                $sid = (int) $it['size_id'];
+                if ($stock[$sid]['full_qty'] < $it['qty']) {
+                    fail('Only ' . $stock[$sid]['full_qty'] . ' full ' . size_label($sid) . ' cylinder(s) in stock at this branch.', 409, 'insufficient_stock');
+                }
+                // Guard every bucket, not just full cylinders: returning more
+                // empties than were sold must not drive "with customers" negative.
+                assert_stock_after($branchId, $sid, -$it['qty'], $it['back'], $it['qty'] - $it['back']);
+                $it['unit_price'] = resolve_price($branchId, $sid);
+                $it['line_total'] = round($it['qty'] * $it['unit_price'], 2);
             }
-            // Guard every bucket, not just full cylinders: returning more
-            // empties than were sold must not drive "with customers" negative.
-            assert_stock_after($branchId, $sid, -$it['qty'], $it['back'], $it['qty'] - $it['back']);
-            $it['unit_price'] = $it['price'] !== null ? round((float) $it['price'], 2) : resolve_price($branchId, $sid);
-            $it['line_total'] = round($it['qty'] * $it['unit_price'], 2);
-        }
-        unset($it);
+            unset($it);
 
-        $subtotal = array_sum(array_column($items, 'line_total'));
-        $total = round($subtotal + $feeTotal, 2);
+            $subtotal = array_sum(array_column($items, 'line_total'));
+            $total = round($subtotal + $feeTotal, 2);
 
-        q(
-            'INSERT INTO sales (branch_id, sale_date, customer_id, payment_method, payment_reference,
-                subtotal, deposit_total, is_rush, rush_fee, is_outside_zone, outside_zone_fee,
-                total_amount, created_by)
-             VALUES (?,?,?,?,?,?,0,?,?,?,?,?,?)',
-            [
-                $branchId, $date, $customerId, $pay, $payReference, $subtotal,
-                $fees['is_rush'], $fees['rush_fee'], $fees['is_outside_zone'], $fees['outside_zone_fee'],
-                $total, (int) $u['id'],
-            ]
-        );
-        $saleId = (int) db()->lastInsertId();
-        q('UPDATE sales SET sale_no=? WHERE id=?', [doc_no('SALE', $date, $saleId), $saleId]);
-        reserve_payment_reference((string) $pay, $payReference, null, $saleId);
-
-        foreach ($items as $it) {
-            $sid = (int) $it['size_id'];
             q(
-                'INSERT INTO sale_items (sale_id, size_id, qty, unit_price, empties_received, deposit_amount, line_total)
-                 VALUES (?,?,?,?,?,0,?)',
-                [$saleId, $sid, $it['qty'], $it['unit_price'], $it['back'], $it['line_total']]
+                'INSERT INTO sales (branch_id, sale_date, customer_id, payment_method, payment_reference, idempotency_key,
+                    subtotal, deposit_total, is_rush, rush_fee, is_outside_zone, outside_zone_fee,
+                    total_amount, created_by)
+                 VALUES (?,?,?,?,?,?,?,0,?,?,?,?,?,?)',
+                [
+                    $branchId, $date, $customerId, $pay, $payReference, $idempotency === '' ? null : $idempotency,
+                    $subtotal,
+                    $fees['is_rush'], $fees['rush_fee'], $fees['is_outside_zone'], $fees['outside_zone_fee'],
+                    $total, (int) $u['id'],
+                ]
             );
-            movement($branchId, $date, $sid, 'sale', $saleId, -$it['qty'], $it['back'], $it['qty'] - $it['back'], (int) $u['id'], 'Direct sale');
+            $saleId = (int) db()->lastInsertId();
+            q('UPDATE sales SET sale_no=? WHERE id=?', [doc_no('SALE', $date, $saleId), $saleId]);
+            reserve_payment_reference((string) $pay, $payReference, null, $saleId);
+
+            foreach ($items as $it) {
+                $sid = (int) $it['size_id'];
+                q(
+                    'INSERT INTO sale_items (sale_id, size_id, qty, unit_price, empties_received, deposit_amount, line_total)
+                     VALUES (?,?,?,?,?,0,?)',
+                    [$saleId, $sid, $it['qty'], $it['unit_price'], $it['back'], $it['line_total']]
+                );
+                movement($branchId, $date, $sid, 'sale', $saleId, -$it['qty'], $it['back'], $it['qty'] - $it['back'], (int) $u['id'], 'Direct sale');
+            }
+            return ['id' => $saleId, 'subtotal' => $subtotal, 'total' => $total];
+        });
+    } catch (PDOException $e) {
+        if ($e->getCode() === '23000' && $idempotency !== '') {
+            $existing = row('SELECT * FROM sales WHERE idempotency_key=?', [$idempotency]);
+            if ($existing) {
+                $s = load_sale_for_user($u, (int) $existing['id']);
+                $items = sales_items_batch([(int) $existing['id']]);
+                json_response(sale_payload($s, $items[(int) $existing['id']] ?? []), 200);
+            }
         }
-        return ['id' => $saleId, 'subtotal' => $subtotal, 'total' => $total];
-    });
+        throw $e;
+    }
 
     audit($u, 'create', 'sale', $result['id'], null, ['total_amount' => $result['total'], 'payment_method' => $pay, 'branch_id' => $branchId], $branchId);
     $s = load_sale_for_user($u, $result['id']);

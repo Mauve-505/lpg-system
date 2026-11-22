@@ -349,13 +349,29 @@ function rate_limit_config(string $action): array
 {
     $window = max(1, (int) config('security.login_window_minutes', 15));
     if ($action === 'signup') {
-        return ['max_user' => 0, 'max_ip' => (int) config('security.signup_max_attempts', 5), 'window' => $window];
+        $max = (int) config('security.signup_max_attempts', 5);
+        return ['max_user' => $max, 'max_ip' => $max, 'window' => $window];
     }
     return [
         'max_user' => (int) config('security.login_max_attempts', 5),
         'max_ip' => (int) config('security.ip_max_attempts', 30),
         'window' => $window,
     ];
+}
+
+/** Exponential backoff, capped at the configured maximum, before a 429. */
+function progressive_delay(int $failedCount): void
+{
+    $base = (int) config('security.progressive_delay_ms', 0);
+    if ($base <= 0) {
+        return;
+    }
+    $max = (int) config('security.progressive_delay_max_ms', 5000);
+    $steps = min(max(0, $failedCount - 1), 6);
+    $delay = min($max, $base * (2 ** $steps));
+    if ($delay > 0) {
+        usleep($delay * 1000);
+    }
 }
 
 function check_rate_limit(string $action, ?string $username): void
@@ -384,6 +400,7 @@ function check_rate_limit(string $action, ?string $username): void
             $retry = max(1, strtotime($oldest . ' +' . $cfg['window'] . ' minutes') - time());
             error_log('Rate limit hit for ' . $action . ' username=' . $username . ' ip=' . $ip);
             header('Retry-After: ' . $retry);
+            progressive_delay($n);
             fail('Too many attempts. Try again in ' . max(1, (int) ceil($retry / 60)) . ' minute(s).', 429, 'rate_limited');
         }
     }
@@ -408,6 +425,7 @@ function check_rate_limit(string $action, ?string $username): void
             $retry = max(1, strtotime($oldest . ' +' . $cfg['window'] . ' minutes') - time());
             error_log('Account rate limit hit for username=' . $username);
             header('Retry-After: ' . $retry);
+            progressive_delay($nAccount);
             fail('This account is temporarily locked. Try again in ' . max(1, (int) ceil($retry / 60)) . ' minute(s).', 429, 'rate_limited');
         }
     }
@@ -428,6 +446,7 @@ function check_rate_limit(string $action, ?string $username): void
         $retry = max(1, strtotime($oldest . ' +' . $cfg['window'] . ' minutes') - time());
         error_log('IP rate limit hit for ' . $action . ' ip=' . $ip);
         header('Retry-After: ' . $retry);
+        progressive_delay($nIp);
         fail('Too many attempts from this network. Try again later.', 429, 'rate_limited');
     }
 }

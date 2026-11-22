@@ -39,6 +39,9 @@ return [
         'lockout_minutes' => 15,
         'signup_max_attempts' => 5,
         'max_body_bytes' => 1048576,
+        'trusted_proxies' => array_values(array_filter(array_map('trim', explode(',', (string) getenv('LPG_TRUSTED_PROXIES'))))),  // e.g. ['127.0.0.1', '10.0.0.0/8']; empty = ignore X-Forwarded-For
+        'progressive_delay_ms' => (int) (getenv('LPG_PROGRESSIVE_DELAY_MS') ?: 200),
+        'progressive_delay_max_ms' => (int) (getenv('LPG_PROGRESSIVE_DELAY_MAX_MS') ?: 5000),
     ],
 
     'bootstrap' => [

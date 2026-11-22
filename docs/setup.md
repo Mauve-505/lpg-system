@@ -253,8 +253,11 @@ What the migration does:
   legacy credit sale still has an outstanding amount**. Settle those amounts
   before running `migrate.php`; the refusal message names the problem. The old
   payments table stays as read-only history.
-- Marks each applied migration so it will not run twice. Migrations 006 and 007
-  belong to later phases; their behaviour is not described here.
+- Applies `006_operational_hardening` (order/sale idempotency keys, structured
+  service areas and per-branch delivery receipt uniqueness) and
+  `008_transfer_receiving` (actual received quantities and shortage notes).
+- Marks each applied migration so it will not run twice. Migration `007_hygiene`
+  belongs to the final cleanup phase.
 
 `migrate.php` writes a `mysqldump` backup to `database/backups/` before
 applying anything. If `mysqldump` is not on `PATH`, set `db.mysqldump_path` in

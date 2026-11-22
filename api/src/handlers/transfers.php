@@ -5,17 +5,23 @@ declare(strict_types=1);
  * Inter-branch stock transfers.
  *
  *   requested -> approved -> in_transit -> received
- *                    \-> cancelled (requested/approved only)
+ *                    \-> cancelled (requested/approved/in_transit)
  *
  * Source stock is decremented exactly once when shipped, destination stock is
  * incremented exactly once when received. Both operations lock the transfer row
  * and the branch/size stock lock rows, so retries and concurrency are safe.
  */
 
+/** Branch-bound roles are tied to u.branch_id and cannot act across branches. */
+function transfer_role_is_branch_scoped(array $u): bool
+{
+    return in_array($u['role'], ['branch_admin', 'staff', 'delivery'], true);
+}
+
 function transfer_items(int $transferId): array
 {
     $items = rows(
-        'SELECT i.id, i.size_id, i.qty_full, i.qty_empty, z.label AS size
+        'SELECT i.id, i.size_id, i.qty_full, i.qty_empty, i.received_full, i.received_empty, z.label AS size
          FROM stock_transfer_items i JOIN cylinder_sizes z ON z.id=i.size_id
          WHERE i.transfer_id=? ORDER BY i.id',
         [$transferId]
@@ -24,6 +30,8 @@ function transfer_items(int $transferId): array
         $it['size_id'] = (int) $it['size_id'];
         $it['qty_full'] = (int) $it['qty_full'];
         $it['qty_empty'] = (int) $it['qty_empty'];
+        $it['received_full'] = isset($it['received_full']) ? (int) $it['received_full'] : null;
+        $it['received_empty'] = isset($it['received_empty']) ? (int) $it['received_empty'] : null;
     }
     unset($it);
     return $items;
@@ -32,6 +40,16 @@ function transfer_items(int $transferId): array
 function transfer_payload(array $t, ?array $items = null): array
 {
     $items = $items ?? transfer_items((int) $t['id']);
+    $shortageFull = 0;
+    $shortageEmpty = 0;
+    foreach ($items as $it) {
+        if (isset($it['received_full'])) {
+            $shortageFull += max(0, (int) $it['qty_full'] - (int) $it['received_full']);
+        }
+        if (isset($it['received_empty'])) {
+            $shortageEmpty += max(0, (int) $it['qty_empty'] - (int) $it['received_empty']);
+        }
+    }
     return [
         'id' => (int) $t['id'],
         'transfer_no' => $t['transfer_no'],
@@ -48,9 +66,12 @@ function transfer_payload(array $t, ?array $items = null): array
         'received_at' => $t['received_at'],
         'cancelled_at' => $t['cancelled_at'],
         'cancel_reason' => $t['cancel_reason'],
+        'shortage_note' => $t['shortage_note'] ?? null,
         'items' => $items,
         'total_full' => array_sum(array_column($items, 'qty_full')),
         'total_empty' => array_sum(array_column($items, 'qty_empty')),
+        'shortage_full' => $shortageFull,
+        'shortage_empty' => $shortageEmpty,
     ];
 }
 
@@ -109,13 +130,14 @@ function transfer_require_destination(array $u, array $t): void
 
 function api_transfers_list(): void
 {
-    $u = require_staff_or_owner();
+    $u = require_order_access();
     $p = pagination();
     $where = '1=1';
     $params = [];
 
-    // Staff see transfers touching their branch. Owner sees all or one branch.
-    if ($u['role'] === 'staff') {
+    // Branch-bound roles see transfers touching their own branch, regardless
+    // of any client-supplied branch_id. The owner may filter by branch.
+    if (transfer_role_is_branch_scoped($u)) {
         $where .= ' AND (t.from_branch_id=? OR t.to_branch_id=?)';
         $params[] = (int) $u['branch_id'];
         $params[] = (int) $u['branch_id'];
@@ -170,6 +192,8 @@ function api_transfers_list(): void
             $x['size_id'] = (int) $x['size_id'];
             $x['qty_full'] = (int) $x['qty_full'];
             $x['qty_empty'] = (int) $x['qty_empty'];
+            $x['received_full'] = isset($x['received_full']) ? (int) $x['received_full'] : null;
+            $x['received_empty'] = isset($x['received_empty']) ? (int) $x['received_empty'] : null;
             $items[(int) $x['transfer_id']][] = $x;
         }
     }
@@ -179,7 +203,7 @@ function api_transfers_list(): void
 
 function api_transfer_show(array $params): void
 {
-    $u = require_staff_or_owner();
+    $u = require_order_access();
     $t = transfer_load((int) $params[0]);
     require_transfer_view($u, $t);
     json_response(transfer_payload($t));
@@ -190,7 +214,7 @@ function api_transfers_create(): void
     $u = require_staff_or_owner();
     $fromId = input_int('from_branch_id', 'Sending branch', 1);
     $toId = input_int('to_branch_id', 'Receiving branch', 1);
-    if ($u['role'] === 'staff') {
+    if (transfer_role_is_branch_scoped($u)) {
         if ($fromId !== (int) $u['branch_id']) {
             fail('You can only request stock from your own branch.', 403, 'branch_forbidden');
         }
@@ -349,41 +373,159 @@ function api_transfer_receive(array $params): void
 {
     $u = require_staff_or_owner();
     $id = (int) $params[0];
-    tx(function () use ($u, $id) {
+    $callerNote = input_str('shortage_note', 'Shortage note', 0, 200, false);
+
+    // Optional per-size actual counts. Sizes not listed are treated as fully
+    // received; a missing count on a listed size means zero received.
+    $rawReceived = body_value('items');
+    $reported = [];
+    if ($rawReceived !== null) {
+        if (!is_array($rawReceived) || count($rawReceived) > 20) {
+            fail('Invalid received items.', 422, 'validation_error', ['field' => 'items']);
+        }
+        foreach ($rawReceived as $it) {
+            if (!is_array($it)) {
+                fail('Invalid received item.', 422, 'validation_error', ['field' => 'items']);
+            }
+            $sid = isset($it['size_id']) && is_numeric($it['size_id']) ? (int) $it['size_id'] : 0;
+            $full = isset($it['received_full']) && is_numeric($it['received_full']) ? (float) $it['received_full']
+                : (isset($it['full']) && is_numeric($it['full']) ? (float) $it['full'] : 0.0);
+            $empty = isset($it['received_empty']) && is_numeric($it['received_empty']) ? (float) $it['received_empty']
+                : (isset($it['empties']) && is_numeric($it['empties']) ? (float) $it['empties'] : 0.0);
+            if ($sid < 1) {
+                fail('Unknown cylinder size.', 422, 'validation_error', ['field' => 'items']);
+            }
+            if (floor($full) !== $full || $full < 0 || $full > 100000 || floor($empty) !== $empty || $empty < 0 || $empty > 100000) {
+                fail('Quantities must be whole numbers between 0 and 100000.', 422, 'validation_error', ['field' => 'items']);
+            }
+            if (isset($reported[$sid])) {
+                fail('Each size may only appear once per transfer.', 422, 'validation_error', ['field' => 'items']);
+            }
+            $reported[$sid] = ['full' => (int) $full, 'empty' => (int) $empty];
+        }
+    }
+
+    $result = tx(function () use ($u, $id, $reported, $callerNote) {
         $t = row('SELECT * FROM stock_transfers WHERE id=? FOR UPDATE', [$id]);
         if (!$t) {
             fail('Transfer not found.', 404, 'not_found');
         }
         transfer_require_destination($u, $t);
         if ($t['status'] === 'received') {
-            return; // idempotent retry
+            return ['shortages' => [], 'shortage_note' => null]; // idempotent retry
         }
         if ($t['status'] !== 'in_transit') {
             fail('Only in-transit transfers can be received.', 409, 'transfer_locked');
         }
-        $items = rows('SELECT * FROM stock_transfer_items WHERE transfer_id=?', [$id]);
+        $items = rows(
+            'SELECT i.*, z.label AS size FROM stock_transfer_items i
+             JOIN cylinder_sizes z ON z.id=i.size_id WHERE i.transfer_id=? ORDER BY i.id',
+            [$id]
+        );
+        $shippedBySize = [];
+        foreach ($items as $it) {
+            $shippedBySize[(int) $it['size_id']] = true;
+        }
+        foreach ($reported as $sid => $counts) {
+            if (!isset($shippedBySize[$sid])) {
+                fail('Received item does not match a shipped size.', 422, 'validation_error', ['field' => 'items']);
+            }
+        }
+
+        $actual = [];
+        $shortBySize = [];
+        $shortages = [];
+        $summary = [];
+        foreach ($items as $it) {
+            $sid = (int) $it['size_id'];
+            $qtyFull = (int) $it['qty_full'];
+            $qtyEmpty = (int) $it['qty_empty'];
+            $receivedFull = isset($reported[$sid]) ? $reported[$sid]['full'] : $qtyFull;
+            $receivedEmpty = isset($reported[$sid]) ? $reported[$sid]['empty'] : $qtyEmpty;
+            if ($receivedFull > $qtyFull || $receivedEmpty > $qtyEmpty) {
+                fail('Received quantities cannot exceed shipped quantities.', 422, 'validation_error', ['field' => 'items']);
+            }
+            $actual[$sid] = ['full' => $receivedFull, 'empty' => $receivedEmpty];
+            $shortFull = $qtyFull - $receivedFull;
+            $shortEmpty = $qtyEmpty - $receivedEmpty;
+            if ($shortFull > 0 || $shortEmpty > 0) {
+                $bits = [];
+                if ($shortFull > 0) {
+                    $bits[] = $shortFull . ' full';
+                }
+                if ($shortEmpty > 0) {
+                    $bits[] = $shortEmpty . ' empty';
+                }
+                $shortBySize[$sid] = ['full' => $shortFull, 'empty' => $shortEmpty];
+                $summary[] = implode(', ', $bits) . ' (' . $it['size'] . ')';
+                $shortages[] = [
+                    'size_id' => $sid,
+                    'size' => $it['size'],
+                    'qty_full' => $qtyFull,
+                    'qty_empty' => $qtyEmpty,
+                    'received_full' => $receivedFull,
+                    'received_empty' => $receivedEmpty,
+                    'short_full' => $shortFull,
+                    'short_empty' => $shortEmpty,
+                ];
+            }
+        }
+
         $sizeIds = array_map(static fn($x) => (int) $x['size_id'], $items);
         lock_stock((int) $t['to_branch_id'], $sizeIds);
         foreach ($items as $it) {
-            assert_stock_after((int) $t['to_branch_id'], (int) $it['size_id'], (int) $it['qty_full'], (int) $it['qty_empty'], 0);
+            $sid = (int) $it['size_id'];
+            assert_stock_after((int) $t['to_branch_id'], $sid, $actual[$sid]['full'], $actual[$sid]['empty'], 0);
         }
         foreach ($items as $it) {
+            $sid = (int) $it['size_id'];
+            $bits = [];
+            if (isset($shortBySize[$sid])) {
+                if ($shortBySize[$sid]['full'] > 0) {
+                    $bits[] = $shortBySize[$sid]['full'] . ' full';
+                }
+                if ($shortBySize[$sid]['empty'] > 0) {
+                    $bits[] = $shortBySize[$sid]['empty'] . ' empty';
+                }
+            }
+            $note = 'Transfer in ' . $t['transfer_no'] . ($bits ? ' (short ' . implode(', ', $bits) . ')' : '');
             movement(
                 (int) $t['to_branch_id'],
                 today(),
-                (int) $it['size_id'],
+                $sid,
                 'transfer',
                 $id,
-                (int) $it['qty_full'],
-                (int) $it['qty_empty'],
+                $actual[$sid]['full'],
+                $actual[$sid]['empty'],
                 0,
                 (int) $u['id'],
-                'Transfer in ' . $t['transfer_no']
+                $note
             );
         }
-        q("UPDATE stock_transfers SET status='received', received_by=?, received_at=? WHERE id=?", [(int) $u['id'], now_iso(), $id]);
+        foreach ($items as $it) {
+            $sid = (int) $it['size_id'];
+            q(
+                'UPDATE stock_transfer_items SET received_full=?, received_empty=? WHERE id=?',
+                [$actual[$sid]['full'], $actual[$sid]['empty'], (int) $it['id']]
+            );
+        }
+        $storedNote = null;
+        if ($shortages) {
+            $storedNote = $callerNote !== '' ? $callerNote : 'Short ' . implode('; ', $summary);
+            $storedNote = mb_substr($storedNote, 0, 200);
+        }
+        q(
+            "UPDATE stock_transfers SET status='received', received_by=?, received_at=?, shortage_note=? WHERE id=?",
+            [(int) $u['id'], now_iso(), $storedNote, $id]
+        );
+        return ['shortages' => $shortages, 'shortage_note' => $storedNote];
     });
-    audit($u, 'receive', 'transfer', $id, ['status' => 'in_transit'], ['status' => 'received'], null);
+
+    $auditNew = ['status' => 'received', 'shortages' => $result['shortages']];
+    if ($result['shortage_note'] !== null) {
+        $auditNew['shortage_note'] = $result['shortage_note'];
+    }
+    audit($u, 'receive', 'transfer', $id, ['status' => 'in_transit'], $auditNew, null);
     json_response(transfer_payload(transfer_load($id)));
 }
 
@@ -392,23 +534,61 @@ function api_transfer_cancel(array $params): void
     $u = require_staff_or_owner();
     $id = (int) $params[0];
     $reason = input_str('reason', 'Cancellation reason', 3, 200);
-    tx(function () use ($u, $id, $reason) {
+    $restored = tx(function () use ($u, $id, $reason) {
         $t = row('SELECT * FROM stock_transfers WHERE id=? FOR UPDATE', [$id]);
         if (!$t) {
             fail('Transfer not found.', 404, 'not_found');
         }
-        require_transfer_view($u, $t);
-        if ($t['status'] === 'cancelled') {
-            return; // idempotent retry
+        // Cancelling in transit returns stock to the sender, so only the source
+        // branch may do it. Earlier stages keep the existing view-level access.
+        if ($t['status'] === 'in_transit') {
+            transfer_require_source($u, $t);
+        } else {
+            require_transfer_view($u, $t);
         }
-        if (!in_array($t['status'], ['requested', 'approved'], true)) {
-            fail('A shipped transfer cannot be cancelled. Receive it, then transfer the stock back.', 409, 'transfer_locked');
+        if ($t['status'] === 'cancelled') {
+            return false; // idempotent retry
+        }
+        if (!in_array($t['status'], ['requested', 'approved', 'in_transit'], true)) {
+            fail('Only requested, approved or in-transit transfers can be cancelled. Cancelling in transit restores stock at the sending branch.', 409, 'transfer_locked');
+        }
+        if ($t['status'] === 'in_transit') {
+            // Shipping already reduced source stock; reverse that exact ledger.
+            $items = rows('SELECT * FROM stock_transfer_items WHERE transfer_id=?', [$id]);
+            $sizeIds = array_map(static fn($x) => (int) $x['size_id'], $items);
+            lock_stock((int) $t['from_branch_id'], $sizeIds);
+            foreach ($items as $it) {
+                assert_stock_after((int) $t['from_branch_id'], (int) $it['size_id'], (int) $it['qty_full'], (int) $it['qty_empty'], 0);
+            }
+            foreach ($items as $it) {
+                movement(
+                    (int) $t['from_branch_id'],
+                    today(),
+                    (int) $it['size_id'],
+                    'transfer',
+                    $id,
+                    (int) $it['qty_full'],
+                    (int) $it['qty_empty'],
+                    0,
+                    (int) $u['id'],
+                    'Transfer cancelled ' . $t['transfer_no']
+                );
+            }
         }
         q(
             "UPDATE stock_transfers SET status='cancelled', cancelled_by=?, cancelled_at=?, cancel_reason=? WHERE id=?",
             [(int) $u['id'], now_iso(), $reason, $id]
         );
+        return $t['status'] === 'in_transit';
     });
-    audit($u, 'cancel', 'transfer', $id, ['status' => 'requested_or_approved'], ['status' => 'cancelled', 'reason' => $reason], null);
+    audit(
+        $u,
+        'cancel',
+        'transfer',
+        $id,
+        ['status' => $restored ? 'in_transit' : 'requested_or_approved'],
+        ['status' => 'cancelled', 'reason' => $reason, 'source_stock_restored' => $restored],
+        null
+    );
     json_response(transfer_payload(transfer_load($id)));
 }

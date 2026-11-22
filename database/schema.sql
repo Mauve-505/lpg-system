@@ -405,7 +405,7 @@ CREATE TABLE IF NOT EXISTS payment_references (
 -- ---------------------------------------------------------------------------
 -- Inter-branch stock transfers
 -- requested -> approved -> in_transit -> received
---                  \-> cancelled (from requested/approved)
+--                  \-> cancelled (from requested/approved/in_transit)
 -- Shipping and receiving each write the source/destination ledger exactly once.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS stock_transfers (
@@ -427,6 +427,7 @@ CREATE TABLE IF NOT EXISTS stock_transfers (
   cancelled_by INT NULL,
   cancelled_at DATETIME NULL,
   cancel_reason VARCHAR(200) NULL,
+  shortage_note VARCHAR(200) NULL,
   INDEX idx_transfers_from (from_branch_id, status),
   INDEX idx_transfers_to (to_branch_id, status),
   CONSTRAINT fk_tr_from FOREIGN KEY (from_branch_id) REFERENCES branches(id) ON DELETE RESTRICT,
@@ -444,6 +445,9 @@ CREATE TABLE IF NOT EXISTS stock_transfer_items (
   size_id INT NOT NULL,
   qty_full INT NOT NULL DEFAULT 0,
   qty_empty INT NOT NULL DEFAULT 0,
+  -- NULL until received; otherwise the actual counts accepted by the destination.
+  received_full INT NULL DEFAULT NULL,
+  received_empty INT NULL DEFAULT NULL,
   CONSTRAINT fk_ti_transfer FOREIGN KEY (transfer_id) REFERENCES stock_transfers(id) ON DELETE CASCADE,
   CONSTRAINT fk_ti_size FOREIGN KEY (size_id) REFERENCES cylinder_sizes(id) ON DELETE RESTRICT
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
@@ -496,6 +500,7 @@ INSERT IGNORE INTO schema_migrations (version) VALUES ('004_rush_same_day_fee');
 INSERT IGNORE INTO schema_migrations (version) VALUES ('005_prepaid_payments');
 INSERT IGNORE INTO schema_migrations (version) VALUES ('006_operational_hardening');
 INSERT IGNORE INTO schema_migrations (version) VALUES ('007_hygiene');
+INSERT IGNORE INTO schema_migrations (version) VALUES ('008_transfer_receiving');
 
 -- One lock row per branch+size so SELECT ... FOR UPDATE always finds a row.
 INSERT IGNORE INTO stock_locks (branch_id, size_id)

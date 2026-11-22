@@ -81,8 +81,12 @@ function api_deliveries_create(): void
     $branchId = (int) $scope['id'];
     require_active_branch($branchId);
 
-    $date = input_date('date', 'Delivery date', false) ?: today();
+    // Deliveries are recorded when they arrive; clients cannot backdate them.
+    $date = today();
     $receipt = input_str('receipt', 'Receipt number', 1, 50);
+    if (row('SELECT id FROM plant_deliveries WHERE branch_id=? AND receipt_no=?', [$branchId, $receipt])) {
+        fail('That receipt number is already recorded for this branch.', 409, 'duplicate_receipt', ['field' => 'receipt']);
+    }
     $supplier = input_str('supplier', 'Supplier', 0, 120, false);
     $remarks = input_str('remarks', 'Remarks', 0, 200, false);
 
@@ -118,27 +122,36 @@ function api_deliveries_create(): void
         $clean[] = ['size_id' => $sid, 'full' => (int) $full, 'empties' => (int) $empty];
     }
 
-    $id = tx(function () use ($u, $branchId, $date, $receipt, $supplier, $remarks, $clean) {
-        lock_stock($branchId, array_map(static fn($x) => $x['size_id'], $clean));
-        // Recording empties returned to the plant cannot take empties below zero.
-        foreach ($clean as $it) {
-            assert_stock_after($branchId, $it['size_id'], $it['full'], -$it['empties'], 0);
-        }
-        q(
-            'INSERT INTO plant_deliveries (branch_id, delivery_date, receipt_no, supplier, remarks, received_by)
-             VALUES (?,?,?,?,?,?)',
-            [$branchId, $date, $receipt, $supplier === '' ? null : $supplier, $remarks === '' ? null : $remarks, (int) $u['id']]
-        );
-        $id = (int) db()->lastInsertId();
-        foreach ($clean as $it) {
+    try {
+        $id = tx(function () use ($u, $branchId, $date, $receipt, $supplier, $remarks, $clean) {
+            lock_stock($branchId, array_map(static fn($x) => $x['size_id'], $clean));
+            // Recording empties returned to the plant cannot take empties below zero.
+            foreach ($clean as $it) {
+                assert_stock_after($branchId, $it['size_id'], $it['full'], -$it['empties'], 0);
+            }
             q(
-                'INSERT INTO plant_delivery_items (delivery_id, size_id, full_received, empties_returned) VALUES (?,?,?,?)',
-                [$id, $it['size_id'], $it['full'], $it['empties']]
+                'INSERT INTO plant_deliveries (branch_id, delivery_date, receipt_no, supplier, remarks, received_by)
+                 VALUES (?,?,?,?,?,?)',
+                [$branchId, $date, $receipt, $supplier === '' ? null : $supplier, $remarks === '' ? null : $remarks, (int) $u['id']]
             );
-            movement($branchId, $date, $it['size_id'], 'delivery', $id, $it['full'], -$it['empties'], 0, (int) $u['id'], 'Plant delivery ' . $receipt);
+            $id = (int) db()->lastInsertId();
+            foreach ($clean as $it) {
+                q(
+                    'INSERT INTO plant_delivery_items (delivery_id, size_id, full_received, empties_returned) VALUES (?,?,?,?)',
+                    [$id, $it['size_id'], $it['full'], $it['empties']]
+                );
+                movement($branchId, $date, $it['size_id'], 'delivery', $id, $it['full'], -$it['empties'], 0, (int) $u['id'], 'Plant delivery ' . $receipt);
+            }
+            return $id;
+        });
+    } catch (PDOException $e) {
+        // The UNIQUE (branch_id, receipt_no) key is the final guard against a
+        // concurrent duplicate submission.
+        if ($e->getCode() === '23000') {
+            fail('That receipt number is already recorded for this branch.', 409, 'duplicate_receipt', ['field' => 'receipt']);
         }
-        return $id;
-    });
+        throw $e;
+    }
 
     audit($u, 'create', 'delivery', $id, null, ['receipt_no' => $receipt, 'branch_id' => $branchId], $branchId);
     json_response(['ok' => 1, 'id' => $id], 201);
